@@ -51,6 +51,7 @@ async function openBook(id) {
   S.bookId = id;
   applyState(st);
   S.nodes = {}; S.htmlLang = {};
+  $("#tableModal").classList.remove("open");
   await Promise.all(S.chapters.map(async (c) => {
     const d = await api(`/api/books/${id}/chapters/${c.id}/nodes`);
     S.nodes[c.id] = d.nodes; S.htmlLang[c.id] = d.html_lang;
@@ -255,7 +256,11 @@ function openEditor(n) {
     <option value="chapter"><option value="sidebar"><option value="footnote"><option value="footnotes">
     <option value="bodymatter"><option value="cover"><option value="title-page"><option value="toc">
     </datalist></label>`);
+  if (n.tag === "table")
+    F.push(`<button id="f_table_ws" type="button">打开表格工作区（表头/合并/关联）</button>`);
   $("#edFields").innerHTML = F.join("");
+  const twsBtn = $("#f_table_ws");
+  if (twsBtn) twsBtn.onclick = () => openTableWorkspace(S.selected.chapterId, n.dom_path);
   $("#edSave").onclick = () => saveEditor(n);
   $("#edLocate").onclick = () => highlightInPreview(n.dom_path);
 }
@@ -312,7 +317,7 @@ function renderIssues() {
     html += `<div class="group-head">${esc(labelOf(check))}（${items.length}）</div>`;
     for (const it of items) {
       html += `<div class="item sev-${it.severity}" data-href="${esc(it.chapter_href || "")}"
-        data-path="${esc(it.node_path || "")}">
+        data-path="${esc(it.node_path || "")}" data-check="${esc(it.check_name)}">
         <div>${esc(it.message)}</div>
         <div class="sub">${esc(it.chapter_href || "全书")} ${it.node_path ? "· " + esc(it.node_path) : ""}</div></div>`;
     }
@@ -322,7 +327,9 @@ function renderIssues() {
     el.onclick = () => {
       const ch = S.chapters.find((c) => c.href === el.dataset.href);
       if (!ch) return;
-      if (el.dataset.path) selectNode(ch.id, el.dataset.path);
+      if (el.dataset.check === "table_a11y" && el.dataset.path)
+        openTableWorkspace(ch.id, el.dataset.path);  // 表格问题 → 打开表格工作区
+      else if (el.dataset.path) selectNode(ch.id, el.dataset.path);
       else selectChapter(ch.id);
     };
   });

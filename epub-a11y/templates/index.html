@@ -65,6 +65,31 @@
     </div>
   </section>
 </main>
+
+<!-- 表格工作区 -->
+<div id="tableModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3>表格工作区</h3>
+      <code id="twPath"></code>
+      <span class="sep"></span>
+      <button id="twClose">✕ 关闭</button>
+    </div>
+    <div class="tw-toolbar">
+      <label>caption <input id="twCaption" size="30" placeholder="表格标题（屏幕阅读器首先朗读）"></label>
+      <button id="twInferCol" title="把首行推断为列表头（th + scope=col/colgroup）">推断列表头</button>
+      <button id="twInferRow" title="把首列推断为行表头（th + scope=row/rowgroup）">推断行表头</button>
+      <span class="sep"></span>
+      <button id="twSave">保存表格修改</button>
+    </div>
+    <div class="tw-body">
+      <div id="twGridWrap"></div>
+      <div id="twSide"></div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
+<script src="/static/table.js"></script>
 </body>
 </html>

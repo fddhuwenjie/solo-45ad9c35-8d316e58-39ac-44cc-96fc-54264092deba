@@ -17,7 +17,9 @@ import db
 import epublib
 from epublib import Book, CHECK_LABELS, CHECKS, AFFECTED_BY_ATTR, \
     AFFECTED_BY_MOVE, AFFECTED_BY_SPINE, apply_updates, move_node, undo_move, \
-    reorder_spine, rebuild_landmarks_nav, find_by_path, dom_path
+    reorder_spine, rebuild_landmarks_nav, find_by_path, dom_path, \
+    apply_table_edits, preview_table_edits, restore_table, check_one_table, \
+    table_model_json
 from sample_book import create_sample
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +80,12 @@ def rescan_chapter(book, href):
         return
     nodes = book.extract_nodes(href)
     db.replace_nodes(book.id, ch["id"], nodes)
+
+
+def recheck_table(book, href, table_path):
+    """表格编辑后只重检受影响的那张表：先删该表路径下的旧问题，再写入新结果。"""
+    db.delete_issues_at_path(book.id, "table_a11y", href, table_path)
+    db.add_issues(book.id, check_one_table(book, href, table_path))
 
 
 def scan_book(book):
@@ -262,6 +270,64 @@ def spine_reorder(book_id):
                     "state": state(book_id)})
 
 
+# ---------------- 表格工作区 ----------------
+@app.route("/api/books/<int:book_id>/table/<int:chapter_id>")
+def table_model(book_id, chapter_id):
+    """表格工作区模型：网格、合并关系、表头覆盖、逐格朗读上下文。"""
+    book = get_book(book_id)
+    href = chapter_href(book_id, chapter_id)
+    try:
+        return jsonify(table_model_json(book, href, request.args.get("path", "")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/api/books/<int:book_id>/table/preview", methods=["POST"])
+def table_preview(book_id):
+    """把暂存编辑应用到内存副本上计算结果（网格/朗读/冲突）后回滚，不落盘。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    href = chapter_href(book_id, d["chapter_id"])
+    try:
+        model, conflicts = preview_table_edits(book, href, d["path"],
+                                               d.get("edits") or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"model": model, "conflicts": conflicts})
+
+
+@app.route("/api/books/<int:book_id>/table/save", methods=["POST"])
+def table_save(book_id):
+    """应用一批表格编辑：记入变更（可撤销）、只重检该表、写回工作副本。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    href = chapter_href(book_id, d["chapter_id"])
+    path = d["path"]
+    table = find_by_path(book.soup(href), path)
+    if table is None or table.name != "table":
+        return jsonify({"error": "表格不存在: %s" % path}), 404
+    old_html = str(table)
+    try:
+        result = apply_table_edits(book, href, path, d.get("edits") or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    if result["summary"]:  # 有实际改动才记入变更记录
+        inverse = {"kind": "table", "chapter": href, "path": path,
+                   "old_html": old_html, "affected": ["table_a11y"]}
+        db.add_change(book_id, "table",
+                      "表格校修 %s @%s（%s）"
+                      % (path, href, "；".join(result["summary"])), inverse)
+    rescan_chapter(book, href)
+    recheck_table(book, href, path)
+    book.save()
+    return jsonify({"ok": True, "conflicts": result["conflicts"],
+                    "model": table_model_json(book, href, path),
+                    "nodes": db.list_nodes(book_id, d["chapter_id"]),
+                    "html_lang": chapter_html_lang(book, href),
+                    "state": state(book_id)})
+
+
 @app.route("/api/books/<int:book_id>/undo", methods=["POST"])
 def undo(book_id):
     change = db.last_active_change(book_id)
@@ -286,6 +352,10 @@ def undo(book_id):
         db.update_chapter_order(book_id, inv["old_order"])
         rebuild_landmarks_nav(book)
         run_checks(book, inv["affected"])
+    elif kind == "table":
+        restore_table(book, inv["chapter"], inv["path"], inv["old_html"])
+        rescan_chapter(book, inv["chapter"])
+        recheck_table(book, inv["chapter"], inv["path"])
     db.mark_change_undone(change["id"])
     book.save()
     return jsonify({"ok": True, "undone": change["summary"],
@@ -376,7 +446,8 @@ def export_changes(book_id):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["时间", "类型", "说明", "已撤销"])
-    kind_label = {"updates": "属性修改", "move": "节点移动", "spine": "章节排序"}
+    kind_label = {"updates": "属性修改", "move": "节点移动", "spine": "章节排序",
+                  "table": "表格校修"}
     for ch in reversed(db.list_changes(book_id, limit=10000)):
         w.writerow([ch["ts"], kind_label.get(ch["kind"], ch["kind"]),
                     ch["summary"], "是" if ch["undone"] else "否"])

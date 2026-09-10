@@ -26,6 +26,7 @@ CHECK_LABELS = {
     "duplicate_id": "重复 ID",
     "broken_anchor": "失效锚点",
     "footnote_backlink": "脚注回链缺失",
+    "table_a11y": "表格表头与关联",
 }
 
 
@@ -377,6 +378,449 @@ def ch_toc(book):
     return out
 
 
+# ---------------- 复杂表格无障碍 ----------------
+def _table_rows(table):
+    """本表的 tr（排除嵌套表格中的行）。"""
+    return [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+
+
+def table_grid(table):
+    """把 table 展开为网格模型：rowspan/colspan 向下/向右占位。
+    返回 {"rows","cols","cells"}；cell: {el,row,col,rowspan,colspan,tag,id,headers,scope,text}"""
+    cells = []
+    occ = {}   # (r,c) -> cell 下标
+    nrows = ncols = 0
+    for r, tr in enumerate(_table_rows(table)):
+        c = 0
+        for el in tr.find_all(["th", "td"], recursive=False):
+            while (r, c) in occ:
+                c += 1
+            try:
+                rs = max(1, int(el.get("rowspan") or 1))
+            except ValueError:
+                rs = 1
+            try:
+                cs = max(1, int(el.get("colspan") or 1))
+            except ValueError:
+                cs = 1
+            cells.append({
+                "el": el, "row": r, "col": c, "rowspan": rs, "colspan": cs,
+                "tag": el.name, "id": el.get("id"),
+                "headers": (el.get("headers") or "").split(),
+                "scope": (el.get("scope") or "").strip().lower() or None,
+                "text": el.get_text(" ", strip=True)[:40],
+            })
+            idx = len(cells) - 1
+            for dr in range(rs):
+                for dc in range(cs):
+                    occ[(r + dr, c + dc)] = idx
+            c += cs
+            ncols = max(ncols, c)
+            nrows = max(nrows, r + rs)
+    return {"rows": nrows, "cols": ncols, "cells": cells}
+
+
+def _resolved_scope(cell):
+    """显式 scope 优先；缺省时按位置推断：首行 → 列方向，其余 → 行方向。"""
+    if cell["scope"] in ("row", "col", "rowgroup", "colgroup"):
+        return cell["scope"]
+    return "col" if cell["row"] == 0 else "row"
+
+
+def _overlap(a_start, a_span, b_start, b_span):
+    return a_start < b_start + b_span and b_start < a_start + a_span
+
+
+def _covers(th, cell):
+    """th 是否（按 scope/位置规则）覆盖 cell。"""
+    sc = _resolved_scope(th)
+    if sc in ("col", "colgroup"):
+        return cell["row"] > th["row"] and _overlap(
+            cell["col"], cell["colspan"], th["col"], th["colspan"])
+    return cell["col"] > th["col"] and _overlap(
+        cell["row"], cell["rowspan"], th["row"], th["rowspan"])
+
+
+def _associations(model):
+    """表头关联：covered_by[数据格]=[表头下标]，covers[表头]=[数据格下标]。
+    带 headers 属性的格按显式引用（保持书写顺序）；其余按 scope/位置推断。"""
+    cells = model["cells"]
+    by_id = {c["id"]: i for i, c in enumerate(cells) if c["id"]}
+    th_idx = [i for i, c in enumerate(cells) if c["tag"] == "th"]
+    covered_by = {i: [] for i in range(len(cells))}
+    covers = {i: [] for i in range(len(cells))}
+    for i, c in enumerate(cells):
+        if c["tag"] != "td":
+            continue
+        if c["headers"]:
+            covered_by[i] = [by_id[h] for h in c["headers"] if h in by_id]
+        else:
+            covered_by[i] = sorted(
+                (j for j in th_idx if _covers(cells[j], c)),
+                key=lambda j: (cells[j]["row"], cells[j]["col"]))
+    for i, lst in covered_by.items():
+        for j in lst:
+            covers[j].append(i)
+    return covered_by, covers
+
+
+def _reading(model, covered_by, i):
+    """模拟屏幕阅读器朗读该格时的上下文（表头序列 + 数据）。"""
+    cells = model["cells"]
+    c = cells[i]
+    if c["tag"] == "th":
+        kind = "列" if _resolved_scope(c) in ("col", "colgroup") else "行"
+        return "%s表头：%s" % (kind, c["text"] or "（空）")
+    heads = [cells[j]["text"] for j in covered_by.get(i, [])]
+    if heads:
+        return "%s：%s" % ("，".join(heads), c["text"] or "（空）")
+    return "（无关联表头）%s" % (c["text"] or "（空）")
+
+
+def _header_cycles(edges):
+    """headers 引用图中的环（Tarjan 强连通分量：大小>1 或自环）。edges: 下标 -> [下标]。"""
+    index, low, on_stack, stack, out = {}, {}, set(), [], []
+    counter = [0]
+
+    def connect(v):
+        index[v] = low[v] = counter[0]
+        counter[0] += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in edges.get(v, []):
+            if w not in index:
+                connect(w)
+                low[v] = min(low[v], low[w])
+            elif w in on_stack:
+                low[v] = min(low[v], index[w])
+        if low[v] == index[v]:
+            scc = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                scc.append(w)
+                if w == v:
+                    break
+            if len(scc) > 1 or scc[0] in edges.get(scc[0], []):
+                out.append(sorted(scc))
+
+    for v in list(edges):
+        if v not in index:
+            connect(v)
+    return out
+
+
+def check_table_el(book, href, table, table_path):
+    """单张表格检查：caption 缺失、视觉表头仍为 td、scope 与合并结构冲突、
+    headers 引用失效/循环、数据格无法关联表头。问题定位在表格路径上。"""
+    soup = book.soup(href)
+    out = []
+    model = table_grid(table)
+    cells = model["cells"]
+    if not cells:
+        return out
+
+    def coord(c):
+        return "第%d行第%d列" % (c["row"] + 1, c["col"] + 1)
+
+    cap = table.find("caption", recursive=False)
+    if cap is None or not cap.get_text(strip=True):
+        out.append(_issue(href, table_path, "table_a11y", "warning",
+                          "表格缺少 <caption> 标题，屏幕阅读器只能读出一串失去上下文的数据"))
+
+    ths = [c for c in cells if c["tag"] == "th"]
+    visual = set()
+    if not ths:
+        first = [c for c in cells if c["row"] == 0]
+        if first and all(c["tag"] == "td" for c in first) \
+                and all(c["el"].find(["strong", "b"]) for c in first):
+            visual = {(c["row"], c["col"]) for c in first}
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "首行是视觉表头（加粗）却仍使用 <td>，应改为 <th> 并设置 scope"))
+
+    for c in cells:
+        if c["tag"] == "td" and c["scope"]:
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "%s 是 <td> 却设置了 scope=\"%s\"：表头单元格应使用 <th>"
+                              % (coord(c), c["scope"])))
+
+    for c in ths:
+        if c["scope"] == "col" and c["colspan"] > 1:
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "%s：scope=\"col\" 与 colspan=%d 冲突，跨列合并表头应使用 scope=\"colgroup\""
+                              % (coord(c), c["colspan"])))
+        if c["scope"] == "row" and c["rowspan"] > 1:
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "%s：scope=\"row\" 与 rowspan=%d 冲突，跨行合并表头应使用 scope=\"rowgroup\""
+                              % (coord(c), c["rowspan"])))
+
+    by_id = {c["id"]: i for i, c in enumerate(cells) if c["id"]}
+    for c in cells:
+        for hid in c["headers"]:
+            if hid in by_id:
+                continue
+            if soup.find(id=hid) is not None:
+                out.append(_issue(href, table_path, "table_a11y", "warning",
+                                  "%s 的 headers 引用了表外元素 id「%s」，关联在朗读时不生效"
+                                  % (coord(c), hid)))
+            else:
+                out.append(_issue(href, table_path, "table_a11y", "error",
+                                  "%s 的 headers 引用了不存在的 id「%s」" % (coord(c), hid)))
+
+    edges = {}
+    for i, c in enumerate(cells):
+        refs = [by_id[h] for h in c["headers"] if h in by_id]
+        if refs:
+            edges[i] = refs
+    for scc in _header_cycles(edges):
+        out.append(_issue(href, table_path, "table_a11y", "error",
+                          "headers 引用循环：%s"
+                          % " ↔ ".join(coord(cells[i]) for i in scc)))
+
+    covered_by, _ = _associations(model)
+    for i, c in enumerate(cells):
+        if c["tag"] != "td" or c["headers"]:
+            continue
+        if (c["row"], c["col"]) in visual:
+            continue
+        if not covered_by.get(i):
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "%s 的数据格「%s」无法关联任何表头"
+                              % (coord(c), c["text"][:20] or "（空）")))
+    return out
+
+
+def ch_table_a11y(book, href):
+    out = []
+    for table in book.soup(href).find_all("table"):
+        if table.find_parent("nav") is not None:
+            continue  # 导航结构中的表格不参与线性朗读
+        if (table.get("role") or "").strip().lower() == "presentation":
+            continue  # 排版用表格无需表头语义
+        out.extend(check_table_el(book, href, table, dom_path(table)))
+    return out
+
+
+def check_one_table(book, href, table_path):
+    """只重检一张表（表格编辑后调用）。"""
+    table = find_by_path(book.soup(href), table_path)
+    if table is None or table.name != "table":
+        return []
+    return check_table_el(book, href, table, table_path)
+
+
+def table_model_json(book, href, table_path):
+    """表格工作区模型：网格、合并关系、表头覆盖范围、逐格朗读上下文与实时问题。"""
+    soup = book.soup(href)
+    table = find_by_path(soup, table_path)
+    if table is None or table.name != "table":
+        raise ValueError("表格不存在: %s" % table_path)
+    model = table_grid(table)
+    covered_by, covers = _associations(model)
+    cells = []
+    for i, c in enumerate(model["cells"]):
+        cells.append({
+            "row": c["row"], "col": c["col"],
+            "rowspan": c["rowspan"], "colspan": c["colspan"],
+            "tag": c["tag"], "id": c["id"], "scope": c["scope"],
+            "headers": c["headers"], "text": c["text"],
+            "covers": sorted(covers[i]),
+            "covered_by": list(covered_by[i]),
+            "reading": _reading(model, covered_by, i),
+        })
+    cap = table.find("caption", recursive=False)
+    return {
+        "path": table_path,
+        "caption": cap.get_text(strip=True) if cap is not None else None,
+        "rows": model["rows"], "cols": model["cols"],
+        "cells": cells,
+        "issues": check_table_el(book, href, table, table_path),
+    }
+
+
+def _ensure_cell_id(soup, tidx, cell):
+    """为表头格生成稳定 id：由表序与网格坐标派生，同一文档状态下结果不变。"""
+    el = cell["el"]
+    if el.get("id"):
+        return el["id"]
+    base = "tbl%d-r%dc%d" % (tidx, cell["row"] + 1, cell["col"] + 1)
+    hid, n = base, 2
+    while soup.find(id=hid) is not None:
+        hid = "%s-%d" % (base, n)
+        n += 1
+    el["id"] = hid
+    return hid
+
+
+def apply_table_edits(book, href, table_path, edits, dirty=True):
+    """应用表格工作区的一批编辑：caption / 逐格 tag、scope / 点选表头关联 / 批量推断。
+    推断与人工指定冲突时保留人工选择并在 conflicts 中说明原因。
+    返回 {"summary": [已应用的改动说明], "conflicts": [...]}。"""
+    soup = book.soup(href)
+    table = find_by_path(soup, table_path)
+    if table is None or table.name != "table":
+        raise ValueError("表格不存在: %s" % table_path)
+    model = table_grid(table)
+    by_coord = {(c["row"], c["col"]): c for c in model["cells"]}
+    summary, conflicts, manual = [], [], set()
+
+    def coord(c):
+        return "第%d行第%d列" % (c["row"] + 1, c["col"] + 1)
+
+    if "caption" in edits and edits["caption"] is not None:
+        text = str(edits["caption"]).strip()
+        cap = table.find("caption", recursive=False)
+        old = cap.get_text(strip=True) if cap is not None else ""
+        if text != old:
+            if text:
+                if cap is None:
+                    cap = soup.new_tag("caption")
+                    table.insert(0, cap)
+                cap.string = text
+                summary.append("caption「%s」" % text)
+            else:
+                cap.extract()
+                summary.append("删除 caption")
+
+    for ce in edits.get("cells") or []:
+        c = by_coord.get((ce.get("row"), ce.get("col")))
+        if c is None:
+            continue
+        manual.add((c["row"], c["col"]))
+        el = c["el"]
+        if ce.get("tag") in ("th", "td") and el.name != ce["tag"]:
+            summary.append("%s %s→%s" % (coord(c), el.name, ce["tag"]))
+            el.name = ce["tag"]
+        if "scope" in ce:
+            v = (ce.get("scope") or "").strip().lower()
+            cur = (el.get("scope") or "").strip().lower()
+            if v != cur:
+                if v:
+                    el["scope"] = v
+                elif el.has_attr("scope"):
+                    del el["scope"]
+                summary.append("%s scope: %s→%s" % (coord(c), cur or "（无）", v or "（无）"))
+
+    tidx = soup.find_all("table").index(table) + 1
+    for lk in edits.get("links") or []:
+        c = by_coord.get((lk.get("row"), lk.get("col")))
+        if c is None:
+            continue
+        el = c["el"]
+        ids = []
+        for hid in lk.get("keep") or []:  # 无法解析到表内坐标的既有引用，原样保留
+            if hid not in ids:
+                ids.append(hid)
+        for rc in lk.get("headers") or []:
+            if not isinstance(rc, (list, tuple)) or len(rc) != 2:
+                continue
+            t = by_coord.get((rc[0], rc[1]))
+            if t is None or t is c:
+                continue
+            hid = _ensure_cell_id(soup, tidx, t)
+            if hid not in ids:
+                ids.append(hid)
+        cur = (el.get("headers") or "").split()
+        if ids != cur:
+            if ids:
+                el["headers"] = " ".join(ids)
+                summary.append("%s 关联表头 id: %s" % (coord(c), " ".join(ids)))
+            else:
+                del el["headers"]
+                summary.append("%s 清除 headers 关联" % coord(c))
+
+    kinds = edits.get("infer") or []
+    if kinds:
+        n, conf = _infer_headers(model, kinds, manual)
+        conflicts.extend(conf)
+        if n:
+            summary.append("批量推断表头 %d 格" % n)
+    if dirty:
+        book.mark_dirty(href)
+    return {"summary": summary, "conflicts": conflicts}
+
+
+def _infer_headers(model, kinds, manual):
+    """批量推断：首行 → 列表头（th + scope=col/colgroup），首列 → 行表头（th + scope=row/rowgroup）。
+    与人工指定或既有语义冲突时保留原状并解释。返回 (改动格数, 冲突列表)。"""
+    cells = model["cells"]
+    conflicts = []
+    changed = 0
+    family = {"col": "col", "colgroup": "col", "row": "row", "rowgroup": "row"}
+
+    def label(c):
+        return "第%d行第%d列" % (c["row"] + 1, c["col"] + 1)
+
+    def infer(c, want, kind_label):
+        nonlocal changed
+        el = c["el"]
+        if (c["row"], c["col"]) in manual:
+            conflicts.append({
+                "row": c["row"] + 1, "col": c["col"] + 1,
+                "kept": el.name, "inferred": "th scope=%s" % want,
+                "reason": "%s 有人工指定的标记，保留人工选择，未采纳%s推断"
+                          % (label(c), kind_label)})
+            return
+        if el.name == "th":
+            cur = (el.get("scope") or "").strip().lower()
+            if not cur:
+                el["scope"] = want
+                changed += 1
+            elif family.get(cur) != family[want]:
+                conflicts.append({
+                    "row": c["row"] + 1, "col": c["col"] + 1,
+                    "kept": "th scope=%s" % cur, "inferred": "th scope=%s" % want,
+                    "reason": "%s 已标记为%s表头，与推断的%s冲突，保留原标记"
+                              % (label(c),
+                                 "行" if family.get(cur) == "row" else "列", kind_label)})
+            return
+        if el.get("headers"):
+            conflicts.append({
+                "row": c["row"] + 1, "col": c["col"] + 1,
+                "kept": "td", "inferred": "th scope=%s" % want,
+                "reason": "%s 带有 headers 显式关联，推断其作为数据格使用，保留 <td>"
+                          % label(c)})
+            return
+        el.name = "th"
+        el["scope"] = want
+        changed += 1
+
+    if "col" in kinds:
+        for c in cells:
+            if c["row"] == 0:
+                infer(c, "colgroup" if c["colspan"] > 1 else "col", "列表头")
+    if "row" in kinds:
+        for c in cells:
+            if c["col"] == 0 and c["row"] > 0:
+                infer(c, "rowgroup" if c["rowspan"] > 1 else "row", "行表头")
+    return changed, conflicts
+
+
+def preview_table_edits(book, href, table_path, edits):
+    """把暂存编辑应用到内存中的表格上，计算结果模型（网格/朗读/冲突）后回滚，不落盘。"""
+    soup = book.soup(href)
+    table = find_by_path(soup, table_path)
+    if table is None or table.name != "table":
+        raise ValueError("表格不存在: %s" % table_path)
+    snapshot = BeautifulSoup(str(table), "xml").find("table")
+    try:
+        result = apply_table_edits(book, href, table_path, edits, dirty=False)
+        model = table_model_json(book, href, table_path)
+    finally:
+        table.replace_with(snapshot)
+    return model, result["conflicts"]
+
+
+def restore_table(book, href, table_path, old_html):
+    """撤销表格校修：用修改前序列化的 HTML 整体替换当前表格。"""
+    soup = book.soup(href)
+    table = find_by_path(soup, table_path)
+    if table is None or table.name != "table":
+        raise ValueError("表格不存在: %s" % table_path)
+    table.replace_with(BeautifulSoup(old_html, "xml").find("table"))
+    book.mark_dirty(href)
+
+
 CHECKS = {
     "img_alt":            {"scope": "chapter", "fn": ch_img_alt},
     "heading_hierarchy":  {"scope": "chapter", "fn": ch_heading_hierarchy},
@@ -385,6 +829,7 @@ CHECKS = {
     "broken_anchor":      {"scope": "chapter", "fn": ch_broken_anchor},
     "footnote_backlink":  {"scope": "book",    "fn": ch_footnote_backlink},
     "toc":                {"scope": "book",    "fn": ch_toc},
+    "table_a11y":         {"scope": "chapter", "fn": ch_table_a11y},
 }
 
 # 编辑动作 → 受影响的检查（只重跑这些）
@@ -394,7 +839,7 @@ AFFECTED_BY_ATTR = {
     "heading_level": ["heading_hierarchy", "toc"],
     "epub_type":     ["footnote_backlink", "toc"],
 }
-AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "footnote_backlink"]
+AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "footnote_backlink", "table_a11y"]
 AFFECTED_BY_SPINE = ["toc"]
 
 

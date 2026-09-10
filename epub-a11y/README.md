@@ -14,6 +14,13 @@
   - 重复 ID
   - 失效锚点（含跨章链接）
   - 脚注回链缺失（支持跨章脚注）
+  - 复杂表格：caption 缺失、视觉表头仍为 td、scope 与合并结构冲突、
+    headers 引用失效/循环、数据格无法关联表头
+- **表格工作区**：从问题列表或表格节点打开；网格视图展开 rowspan/colspan 合并关系，
+  点选单元格即高亮其表头与覆盖范围；可编辑 caption、切换 th/td、设置 scope、
+  点选关联表头（自动生成稳定的 id/headers）；支持批量推断行/列表头
+  （与人工指定冲突时保留人工选择并解释原因）；保存前逐格预览屏幕阅读器朗读上下文；
+  保存后只重检该张表格
 - **编辑**：拖拽调整章节/章内节点顺序；增删地标（自动同步 nav 的 landmarks 导航）；修改标题级别、lang、alt
 - **撤销**：每次修改均可撤销，变更记录（含已撤销项）完整保留
 - **导出**：修正版 EPUB（可重新导入继续校修）、逐项变更记录 CSV、未解决问题报告 HTML
@@ -35,17 +42,19 @@ python3 selftest.py
 ```
 
 端到端覆盖：样例书检查项、属性编辑与撤销、节点/章节拖拽排序、地标增删与 nav 同步、
-html 根元素语言编辑、预览与资源、EPUB 导出后重新导入、变更记录与问题报告导出。
+html 根元素语言编辑、表格工作区（网格模型/预览不落盘/推断冲突/稳定 id/单表重检/撤销）、
+预览与资源、EPUB 导出后重新导入、变更记录与问题报告导出。
 
 ## 目录结构
 
 ```
-app.py            Flask 路由与 API（编辑只重跑受影响检查，撤销栈）
-epublib.py        EPUB 解析、DOM 路径定位、检查引擎、编辑操作、nav 地标同步
+app.py            Flask 路由与 API（编辑只重跑受影响检查，撤销栈，表格工作区接口）
+epublib.py        EPUB 解析、DOM 路径定位、检查引擎、编辑操作、nav 地标同步、
+                  表格网格模型（rowspan/colspan 展开、scope/headers 关联、朗读模拟）
 db.py             SQLite 持久层（书籍/章节/节点/问题/变更记录）
-sample_book.py    内置样例书生成器（故意植入各类无障碍问题）
+sample_book.py    内置样例书生成器（故意植入各类无障碍问题，含三张典型表格）
 selftest.py       端到端回归测试
-templates/ static/  原生 HTML/CSS/JS 前端
+templates/ static/  原生 HTML/CSS/JS 前端（static/table.js 为表格工作区）
 data/             运行期生成：app.db、样例书、各书工作副本 working.epub
 ```
 

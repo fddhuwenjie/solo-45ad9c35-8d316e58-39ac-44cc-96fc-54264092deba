@@ -71,7 +71,7 @@ def main():
     bid = r.get_json()["book_id"]
     st = r.get_json()["state"]
     check("载入样例书", bid >= 1)
-    check("章节数=3", len(st["chapters"]) == 3)
+    check("章节数=4", len(st["chapters"]) == 4)
 
     issues = st["issues"]
     by = {}
@@ -90,6 +90,7 @@ def main():
     ch1 = [x for x in st["chapters"] if "ch1" in x["href"]][0]
     ch2 = [x for x in st["chapters"] if "ch2" in x["href"]][0]
     ch3 = [x for x in st["chapters"] if "ch3" in x["href"]][0]
+    ch4 = [x for x in st["chapters"] if "ch4" in x["href"]][0]
 
     # 2. 节点提取 + html 根语言
     d1 = c.get(f"/api/books/{bid}/chapters/{ch1['id']}/nodes").get_json()
@@ -167,11 +168,12 @@ def main():
     ai = [n["order_index"] for n in d["nodes"] if n["tag"] == "aside"][0]
     hi = [n["order_index"] for n in d["nodes"] if n["tag"] == "h2"][0]
     check("侧栏已位于 h2 之后", ai > hi, f"aside={ai} h2={hi}")
-    check("移动重跑了 toc/heading/footnote 检查",
-          set(d["checks_ran"]) == {"heading_hierarchy", "toc", "footnote_backlink"})
+    check("移动重跑了 toc/heading/footnote/table 检查",
+          set(d["checks_ran"]) == {"heading_hierarchy", "toc", "footnote_backlink",
+                                   "table_a11y"})
 
     # 8. 章节排序：使 spine 与目录一致，然后撤销
-    order = [ch1["id"], ch3["id"], ch2["id"]]
+    order = [ch1["id"], ch3["id"], ch2["id"], ch4["id"]]
     r = c.post(f"/api/books/{bid}/spine/reorder", json={"order": order})
     d = r.get_json()
     check("spine 重排", d["ok"])
@@ -210,6 +212,94 @@ def main():
                   for l in d["state"]["landmarks"]))
     check("nav landmarks 同步移除被删链接", "ch3.xhtml#sb2" not in nav_html)
 
+    # 9.5 复杂表格无障碍：检查 → 工作区模型 → 预览（不落盘）→ 保存 → 撤销 → 推断冲突
+    st = c.get(f"/api/books/{bid}").get_json()
+    t_issues = [i for i in st["issues"] if i["check_name"] == "table_a11y"]
+    check("表格问题总数=12", len(t_issues) == 12, len(t_issues))
+    check("表格:caption 缺失", any("caption" in i["message"] for i in t_issues))
+    check("表格:视觉表头仍为 td", any("视觉表头" in i["message"] for i in t_issues))
+    check("表格:headers 引用失效", any("不存在的 id" in i["message"] for i in t_issues))
+    check("表格:headers 引用循环", any("循环" in i["message"] for i in t_issues))
+    check("表格:scope 与合并结构冲突", any("rowgroup" in i["message"] for i in t_issues))
+    check("表格:7 格无法关联表头",
+          len([i for i in t_issues if "无法关联" in i["message"]]) == 7,
+          [i["message"] for i in t_issues if "无法关联" in i["message"]])
+    r = c.get(f"/api/books/{bid}/export/report")
+    check("问题报告含表格分类", "表格表头与关联" in r.get_data(as_text=True))
+
+    tA = "html[1]/body[1]/section[1]/table[1]"
+    tB = "html[1]/body[1]/section[1]/table[2]"
+    r = c.get(f"/api/books/{bid}/table/{ch4['id']}", query_string={"path": tA})
+    m = r.get_json()
+    check("表格模型 4行3列", m["rows"] == 4 and m["cols"] == 3, (m["rows"], m["cols"]))
+    cell10 = [x for x in m["cells"] if x["row"] == 1 and x["col"] == 0][0]
+    check("合并单元格展开 rowspan=2", cell10["rowspan"] == 2)
+    check("首行仍是 td", all(x["tag"] == "td" for x in m["cells"] if x["row"] == 0))
+    check("表A 实时问题=10", len(m["issues"]) == 10, len(m["issues"]))
+
+    # 预览：caption + 批量推断 + 人工坚持 (1,0) 为 td（与行表头推断冲突）+ 点选关联
+    editsA = {
+        "caption": "各地区季度销售额",
+        "cells": [{"row": 1, "col": 0, "tag": "td"}],
+        "links": [{"row": 3, "col": 2, "headers": [[0, 2]]}],
+        "infer": ["col", "row"],
+    }
+    r = c.post(f"/api/books/{bid}/table/preview",
+               json={"chapter_id": ch4["id"], "path": tA, "edits": editsA})
+    d = r.get_json()
+    pm = d["model"]
+    check("预览即见 caption", pm["caption"] == "各地区季度销售额")
+    c00 = [x for x in pm["cells"] if x["row"] == 0 and x["col"] == 0][0]
+    check("推断列表头: 首行转 th+scope=col", c00["tag"] == "th" and c00["scope"] == "col")
+    c30 = [x for x in pm["cells"] if x["row"] == 3 and x["col"] == 0][0]
+    check("推断行表头: 首列转 th+scope=row", c30["tag"] == "th" and c30["scope"] == "row")
+    check("推断冲突保留人工选择并解释原因",
+          any(x["row"] == 2 and x["col"] == 1 and "人工" in x["reason"]
+              for x in d["conflicts"]), d["conflicts"])
+    c02 = [x for x in pm["cells"] if x["row"] == 0 and x["col"] == 2][0]
+    c32 = [x for x in pm["cells"] if x["row"] == 3 and x["col"] == 2][0]
+    check("点选关联生成稳定 id/headers",
+          bool(c02["id"]) and c32["headers"] == [c02["id"]], (c02["id"], c32["headers"]))
+    read12 = [x for x in pm["cells"] if x["row"] == 1 and x["col"] == 2][0]["reading"]
+    check("逐格朗读预览含表头上下文", "销售额" in read12 and "120" in read12, read12)
+    st_now = c.get(f"/api/books/{bid}").get_json()
+    check("预览不落盘（问题仍是 12）",
+          len([i for i in st_now["issues"] if i["check_name"] == "table_a11y"]) == 12)
+
+    # 保存：表A 问题清零，只重检该表（表B 的 2 项原样保留），变更记录可查
+    r = c.post(f"/api/books/{bid}/table/save",
+               json={"chapter_id": ch4["id"], "path": tA, "edits": editsA})
+    d = r.get_json()
+    check("保存表格成功", d["ok"])
+    ta_after = [i for i in d["state"]["issues"] if i["check_name"] == "table_a11y"]
+    check("保存后仅剩表B 的 2 项（只重检受影响表格）",
+          len(ta_after) == 2 and all(i["node_path"] == tB for i in ta_after),
+          [(i["node_path"], i["message"]) for i in ta_after])
+    check("变更记录含表格校修", any(ch["kind"] == "table" for ch in d["state"]["changes"]))
+
+    # 撤销：表A 问题重现；再保存验证 id 生成稳定
+    r = c.post(f"/api/books/{bid}/undo")
+    d = r.get_json()
+    ta_undo = [i for i in d["state"]["issues"] if i["check_name"] == "table_a11y"]
+    check("撤销表格校修后表A 问题重现", len(ta_undo) == 12, len(ta_undo))
+    r = c.post(f"/api/books/{bid}/table/save",
+               json={"chapter_id": ch4["id"], "path": tA, "edits": editsA})
+    d = r.get_json()
+    check("重新保存表格", d["ok"])
+    c02 = [x for x in d["model"]["cells"] if x["row"] == 0 and x["col"] == 2][0]
+    check("重新保存生成相同稳定 id", c02["id"] == "tbl1-r1c3", c02["id"])
+
+    # 表B：修复 scope 冲突（row→rowgroup）并清除循环 headers
+    editsB = {"cells": [{"row": 1, "col": 0, "scope": "rowgroup"}],
+              "links": [{"row": 1, "col": 1, "headers": []},
+                        {"row": 1, "col": 2, "headers": []}]}
+    r = c.post(f"/api/books/{bid}/table/save",
+               json={"chapter_id": ch4["id"], "path": tB, "edits": editsB})
+    d = r.get_json()
+    check("修复表B scope 冲突与循环", d["ok"])
+    ta_b = [i for i in d["state"]["issues"] if i["check_name"] == "table_a11y"]
+    check("全部表格问题清零", len(ta_b) == 0, [i["message"] for i in ta_b])
+
     # 10. 预览与资源
     r = c.get(f"/api/books/{bid}/preview/ch1.xhtml")
     check("预览页面可访问", r.status_code == 200 and b"pathOf" in r.data)
@@ -221,14 +311,20 @@ def main():
     check("导出 EPUB", r.status_code == 200 and r.data[:2] == b"PK")
     with zipfile.ZipFile(io.BytesIO(r.data)) as z:
         nav_bytes = z.read("nav.xhtml")
+        ch4_bytes = z.read("ch4.xhtml")
         names = z.namelist()
     check("导出包 nav 含 landmarks 导航", b'epub:type="landmarks"' in nav_bytes)
+    check("导出包含表格修复（caption+稳定 id+rowgroup）",
+          "各地区季度销售额".encode() in ch4_bytes and b"tbl1-r1c3" in ch4_bytes
+          and b'scope="rowgroup"' in ch4_bytes)
     check("导出包 mimetype 为首项", names[0] == "mimetype")
     r2 = c.post("/api/import", data={"file": (io.BytesIO(r.data), "fixed.epub")},
                 content_type="multipart/form-data")
     check("修正版 EPUB 可重新打开", r2.status_code == 200, r2.get_json().get("error"))
     st2 = r2.get_json()["state"]
-    check("重开书籍章节数=3", len(st2["chapters"]) == 3)
+    check("重开书籍章节数=4", len(st2["chapters"]) == 4)
+    check("重开后表格修复仍生效（表格问题为零）",
+          not any(i["check_name"] == "table_a11y" for i in st2["issues"]))
     check("重开后 h3 修复仍生效",
           not any(i["check_name"] == "heading_hierarchy" for i in st2["issues"]))
     check("重开后 lang 修复仍生效",

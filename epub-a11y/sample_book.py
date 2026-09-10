@@ -10,6 +10,8 @@
 - 第二章失效锚点 #nowhere
 - 跨章脚注：第一章 noteref → 第三章 fn1，fn1 缺少回链；fn2 有回链作对照
 - 错序侧栏：第一章 aside.sidebar 位于其所属小节标题之前，第三章侧栏在引言段之前
+- 第四章复杂表格：表A 缺 caption、首行视觉表头仍为 td、headers 引用失效、数据格无法关联表头；
+  表B scope 与合并结构冲突、headers 引用循环；表C 为规范用法对照（无问题）
 """
 import base64
 import os
@@ -63,6 +65,36 @@ CH3 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第三章 结果') + """
 </section>
 </body></html>"""
 
+CH4 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第四章 数据表格') + """
+<body>
+<section epub:type="chapter" id="s4">
+<h1 id="ch4">第四章 数据表格</h1>
+<p>本章演示复杂表格的表头层级与关联校修。</p>
+<h2>销售额表（待修复）</h2>
+<table>
+<tr><td><strong>地区</strong></td><td><strong>季度</strong></td><td><strong>销售额(万元)</strong></td></tr>
+<tr><td rowspan="2">华东</td><td>Q1</td><td>120</td></tr>
+<tr><td>Q2</td><td>135</td></tr>
+<tr><td>华南</td><td>Q1</td><td headers="sale-q1">98</td></tr>
+</table>
+<h2>员工出勤表（部分标记错误）</h2>
+<table>
+<caption>员工出勤表</caption>
+<tr><th scope="col">项目组</th><th scope="col">姓名</th><th scope="col">出勤天数</th></tr>
+<tr><th id="b-g1" scope="row" rowspan="2">A组</th><th id="b-n1" scope="row" headers="b-c1">张三</th><td id="b-c1" headers="b-n1">22</td></tr>
+<tr><th id="b-n2" scope="row">李四</th><td>21</td></tr>
+</table>
+<h2>规范示例</h2>
+<table>
+<caption>各地区季度销售额（规范示例）</caption>
+<tr><th scope="col">地区</th><th scope="col">季度</th><th scope="col">销售额(万元)</th></tr>
+<tr><th scope="rowgroup" rowspan="2">华东</th><th scope="row">Q1</th><td>120</td></tr>
+<tr><th scope="row">Q2</th><td>135</td></tr>
+<tr><th scope="rowgroup">华南</th><th scope="row">Q1</th><td>98</td></tr>
+</table>
+</section>
+</body></html>"""
+
 NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <body>
 <nav epub:type="toc" id="toc">
@@ -71,6 +103,7 @@ NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <li><a href="ch1.xhtml">第一章 引言</a></li>
 <li><a href="ch3.xhtml">第三章 结果</a></li>
 <li><a href="ch2.xhtml">第二章 方法</a></li>
+<li><a href="ch4.xhtml">第四章 数据表格</a></li>
 </ol>
 </nav>
 <nav epub:type="landmarks" id="landmarks">
@@ -94,11 +127,12 @@ OPF = """<?xml version="1.0" encoding="utf-8"?>
 <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
+<item id="ch4" href="ch4.xhtml" media-type="application/xhtml+xml"/>
 <item id="css" href="css/style.css" media-type="text/css"/>
 <item id="img1" href="images/photo.png" media-type="image/png"/>
 <item id="img2" href="images/deco.png" media-type="image/png"/>
 </manifest>
-<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/></spine>
+<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/><itemref idref="ch4"/></spine>
 </package>"""
 
 CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
@@ -123,6 +157,7 @@ def create_sample(path):
             ("ch1.xhtml", CH1),
             ("ch2.xhtml", CH2),
             ("ch3.xhtml", CH3),
+            ("ch4.xhtml", CH4),
             ("css/style.css", CSS),
         ]:
             z.writestr(name, data.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)

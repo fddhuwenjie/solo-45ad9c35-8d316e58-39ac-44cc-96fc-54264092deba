@@ -140,6 +140,15 @@ def delete_issues(book_id, check_name, chapter_href="__ALL__"):
                 (book_id, check_name, chapter_href))
 
 
+def delete_issues_at_path(book_id, check_name, chapter_href, node_path):
+    """只删除某节点路径下的问题（表格编辑后只重检受影响的那张表）。"""
+    with connect() as c:
+        c.execute(
+            """DELETE FROM issues WHERE book_id=? AND check_name=?
+               AND chapter_href=? AND node_path=?""",
+            (book_id, check_name, chapter_href, node_path))
+
+
 def add_issues(book_id, issues):
     with connect() as c:
         for it in issues:
