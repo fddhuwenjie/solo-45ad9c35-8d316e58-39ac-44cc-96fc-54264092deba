@@ -189,22 +189,24 @@ class Book:
             "el_id": el.get("id"),
         }
 
-    def landmarks(self):
+    def collect_landmarks(self):
+        """spine 文档中的地标元素（导航文档自身的镜像条目不计入）。"""
         out = []
-        docs = list(self.spine)
-        if self.nav_path:
-            docs.append(self.nav_path)
-        for href in docs:
+        for href in self.spine:
             if href not in self.raw:
                 continue
             for el in self.soup(href).find_all(attrs={"epub:type": True}):
-                t = el["epub:type"]
-                if t in ("noteref", "footnote", "endnote", "toc"):
+                t = (el.get("epub:type") or "").strip()
+                if not t or t in ("noteref", "footnote", "endnote", "toc", "landmarks"):
                     continue
                 out.append({"chapter": href, "path": dom_path(el), "tag": el.name,
-                            "epub_type": t,
+                            "epub_type": t, "el_id": el.get("id"),
                             "text": el.get_text(" ", strip=True)[:40]})
         return out
+
+    def landmarks(self):
+        return [{k: v for k, v in lm.items() if k != "el_id"}
+                for lm in self.collect_landmarks()]
 
     # ---- 序列化 / 保存 ----
     def save(self):
@@ -360,7 +362,10 @@ def ch_toc(book):
             hid = h.get("id")
             if not hid:
                 continue
-            if sp not in referenced_docs and "%s#%s" % (sp, hid) not in referenced:
+            # h1 可被「整章链接」覆盖；h2 小节必须在目录中有显式 #id 条目
+            explicit = "%s#%s" % (sp, hid) in referenced
+            covered = explicit or (h.name == "h1" and sp in referenced_docs)
+            if not covered:
                 out.append(_issue(sp, dom_path(h), "toc", "warning",
                                   "标题「%s」未收录进目录"
                                   % h.get_text(strip=True)[:30]))
@@ -391,7 +396,8 @@ AFFECTED_BY_SPINE = ["toc"]
 # ---------------- 编辑操作（返回逆操作所需信息） ----------------
 def apply_updates(book, chapter, path, updates):
     """修改节点属性；updates: {alt?, lang?, heading_level?, epub_type?}。
-    返回修改前的旧值字典（用于撤销）。"""
+    返回 (修改前旧值字典, 修改后的 dom_path)——标题改名会改变路径，
+    撤销定位必须以修改后的路径为准。"""
     el = find_by_path(book.soup(chapter), path)
     if el is None:
         raise ValueError("节点不存在: %s" % path)
@@ -399,7 +405,8 @@ def apply_updates(book, chapter, path, updates):
     for attr, value in updates.items():
         if attr == "heading_level":
             old[attr] = el.name
-            el.name = "h%d" % int(value)
+            v = str(value)
+            el.name = v if v.startswith("h") else "h%d" % int(v)
         elif attr == "epub_type":
             old[attr] = el.get("epub:type")
             if value:
@@ -408,7 +415,11 @@ def apply_updates(book, chapter, path, updates):
                 del el["epub:type"]
         elif attr == "alt":
             old[attr] = el.get("alt")
-            el["alt"] = value
+            if value is None:  # 撤销时恢复原状：原本没有 alt 就删除该属性
+                if el.has_attr("alt"):
+                    del el["alt"]
+            else:
+                el["alt"] = value
         elif attr == "lang":
             old[attr] = el.get("lang") or el.get("xml:lang")
             if value:
@@ -418,7 +429,7 @@ def apply_updates(book, chapter, path, updates):
         else:
             raise ValueError("不支持的属性: %s" % attr)
     book.mark_dirty(chapter)
-    return old
+    return old, dom_path(el)
 
 
 def move_node(book, chapter, path, before_path=None, parent_path=None):
@@ -473,3 +484,44 @@ def reorder_spine(book, ordered_hrefs):
     book.spine = list(ordered_hrefs)
     book.mark_dirty(book.opf_path)
     return old
+
+
+def rebuild_landmarks_nav(book):
+    """根据 spine 文档当前的地标，重建导航文档中 epub:type="landmarks" 的链接列表。
+    在增删地标（epub:type 编辑）或调整章节顺序后调用，保证 nav 与正文同步。"""
+    if not book.nav_path or book.nav_path not in book.raw:
+        return
+    nav = book.soup(book.nav_path)
+    body = nav.find("body")
+    if body is None:
+        return
+
+    nav_dir = posixpath.dirname(book.nav_path)
+    entries = []
+    for lm in book.collect_landmarks():
+        rel = posixpath.relpath(lm["chapter"], nav_dir) if nav_dir else lm["chapter"]
+        if lm["el_id"]:
+            rel += "#" + lm["el_id"]
+        entries.append((lm["epub_type"], rel, lm["text"] or lm["epub_type"]))
+
+    old_nav = nav.find("nav", attrs={"epub:type": "landmarks"})
+    if old_nav is not None:
+        old_nav.extract()
+    if entries:
+        nav_el = nav.new_tag("nav")
+        nav_el["epub:type"] = "landmarks"
+        nav_el["id"] = "landmarks"
+        h = nav.new_tag("h1")
+        h.string = "地标"
+        nav_el.append(h)
+        ol = nav.new_tag("ol")
+        for epub_type, rel, text in entries:
+            li = nav.new_tag("li")
+            a = nav.new_tag("a", href=rel)
+            a["epub:type"] = epub_type
+            a.string = text
+            li.append(a)
+            ol.append(li)
+        nav_el.append(ol)
+        body.append(nav_el)
+    book.mark_dirty(book.nav_path)

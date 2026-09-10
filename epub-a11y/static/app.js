@@ -5,6 +5,7 @@ const S = {
   bookId: null,
   chapters: [],
   nodes: {},          // chapterId -> [node]
+  htmlLang: {},       // chapterId -> <html> 的 lang
   issues: [],
   landmarks: [],
   changes: [],
@@ -49,9 +50,10 @@ async function openBook(id) {
   const st = await api(`/api/books/${id}`);
   S.bookId = id;
   applyState(st);
-  S.nodes = {};
+  S.nodes = {}; S.htmlLang = {};
   await Promise.all(S.chapters.map(async (c) => {
-    S.nodes[c.id] = await api(`/api/books/${id}/chapters/${c.id}/nodes`);
+    const d = await api(`/api/books/${id}/chapters/${c.id}/nodes`);
+    S.nodes[c.id] = d.nodes; S.htmlLang[c.id] = d.html_lang;
   }));
   $("#bookSelect").value = id;
   renderAll();
@@ -227,7 +229,12 @@ function selectNode(cid, path, sendToPreview = true) {
   S.selected = { chapterId: cid, path };
   renderTree();
   if (sendToPreview) highlightInPreview(path);
-  const n = findNode(cid, path);
+  let n = findNode(cid, path);
+  if (!n && path === "html[1]") {
+    // <html> 根元素不在阅读节点表中，构造伪节点以编辑其 lang
+    n = { tag: "html", dom_path: "html[1]", lang: S.htmlLang[cid] || null,
+          el_id: null, text: "<html> 根元素" };
+  }
   if (n) openEditor(n);
 }
 
@@ -267,6 +274,7 @@ async function saveEditor(n) {
   const r = await api(`/api/books/${S.bookId}/node/update`, "POST", {
     chapter_id: S.selected.chapterId, dom_path: n.dom_path, updates });
   S.nodes[S.selected.chapterId] = r.nodes;
+  S.htmlLang[S.selected.chapterId] = r.html_lang;
   applyState(r.state); renderAll(); reloadPreview();
   $("#editor").classList.remove("open");
   toast("已保存；重跑检查: " + (r.checks_ran.map(labelOf).join("、") || "无"));
@@ -348,6 +356,7 @@ function renderLandmarks() {
       const r = await api(`/api/books/${S.bookId}/node/update`, "POST", {
         chapter_id: ch.id, dom_path: lm.path, updates: { epub_type: "" } });
       S.nodes[ch.id] = r.nodes;
+      S.htmlLang[ch.id] = r.html_lang;
       applyState(r.state); renderAll(); reloadPreview();
       toast("地标已删除；重跑检查: " + r.checks_ran.map(labelOf).join("、"));
     };
@@ -388,9 +397,10 @@ $("#btnSample").onclick = async () => {
 $("#btnUndo").onclick = async () => {
   const r = await api(`/api/books/${S.bookId}/undo`, "POST");
   applyState(r.state);
-  S.nodes = {};
+  S.nodes = {}; S.htmlLang = {};
   await Promise.all(S.chapters.map(async (c) => {
-    S.nodes[c.id] = await api(`/api/books/${S.bookId}/chapters/${c.id}/nodes`);
+    const d = await api(`/api/books/${S.bookId}/chapters/${c.id}/nodes`);
+    S.nodes[c.id] = d.nodes; S.htmlLang[c.id] = d.html_lang;
   }));
   renderAll(); reloadPreview();
   toast("已撤销: " + r.undone);

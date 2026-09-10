@@ -17,7 +17,7 @@ import db
 import epublib
 from epublib import Book, CHECK_LABELS, CHECKS, AFFECTED_BY_ATTR, \
     AFFECTED_BY_MOVE, AFFECTED_BY_SPINE, apply_updates, move_node, undo_move, \
-    reorder_spine, find_by_path, dom_path
+    reorder_spine, rebuild_landmarks_nav, find_by_path, dom_path
 from sample_book import create_sample
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -167,9 +167,19 @@ def book_state(book_id):
     return jsonify(state(book_id))
 
 
+def chapter_html_lang(book, href):
+    html = book.soup(href).find("html")
+    if html is None:
+        return None
+    return html.get("lang") or html.get("xml:lang")
+
+
 @app.route("/api/books/<int:book_id>/chapters/<int:chapter_id>/nodes")
 def chapter_nodes(book_id, chapter_id):
-    return jsonify(db.list_nodes(book_id, chapter_id))
+    book = get_book(book_id)
+    href = chapter_href(book_id, chapter_id)
+    return jsonify({"nodes": db.list_nodes(book_id, chapter_id),
+                    "html_lang": chapter_html_lang(book, href)})
 
 
 # ---------------- 编辑 ----------------
@@ -181,21 +191,24 @@ def node_update(book_id):
     href = chapter_href(book_id, d["chapter_id"])
     path, updates = d["dom_path"], d["updates"]
     try:
-        old = apply_updates(book, href, path, updates)
+        old, new_path = apply_updates(book, href, path, updates)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     affected = sorted({c for a in updates for c in AFFECTED_BY_ATTR.get(a, [])})
-    inverse = {"kind": "updates", "chapter": href, "path": path,
+    inverse = {"kind": "updates", "chapter": href, "path": new_path,
                "old": old, "affected": affected}
     desc = "、".join("%s: %r→%r" % (a, old[a], updates[a]) for a in updates)
     db.add_change(book_id, "updates", "修改 %s @%s（%s）" % (path, href, desc), inverse)
 
+    if "epub_type" in updates:  # 增删地标 → 同步导航文档的 landmarks 链接
+        rebuild_landmarks_nav(book)
     rescan_chapter(book, href)
     run_checks(book, affected, href)
     book.save()
     return jsonify({"ok": True, "checks_ran": affected,
                     "nodes": db.list_nodes(book_id, d["chapter_id"]),
+                    "html_lang": chapter_html_lang(book, href),
                     "state": state(book_id)})
 
 
@@ -242,6 +255,7 @@ def spine_reorder(book_id):
                   % " → ".join(os.path.basename(h) for h in ordered), inverse)
 
     db.update_chapter_order(book_id, ordered)
+    rebuild_landmarks_nav(book)  # 地标链接顺序跟随 spine
     run_checks(book, AFFECTED_BY_SPINE)
     book.save()
     return jsonify({"ok": True, "checks_ran": AFFECTED_BY_SPINE,
@@ -258,6 +272,8 @@ def undo(book_id):
     kind = inv["kind"]
     if kind == "updates":
         apply_updates(book, inv["chapter"], inv["path"], inv["old"])
+        if "epub_type" in inv["old"]:  # 撤销地标增删 → 同步导航文档
+            rebuild_landmarks_nav(book)
         rescan_chapter(book, inv["chapter"])
         run_checks(book, inv["affected"], inv["chapter"])
     elif kind == "move":
@@ -268,6 +284,7 @@ def undo(book_id):
     elif kind == "spine":
         reorder_spine(book, inv["old_order"])
         db.update_chapter_order(book_id, inv["old_order"])
+        rebuild_landmarks_nav(book)
         run_checks(book, inv["affected"])
     db.mark_change_undone(change["id"])
     book.save()
