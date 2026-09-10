@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>EPUB 无障碍阅读顺序校修工具</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <span class="logo">📖 EPUB 无障碍校修</span>
+  <select id="bookSelect" title="选择书籍"></select>
+  <button id="btnImport">导入 EPUB</button>
+  <input type="file" id="fileInput" accept=".epub" hidden>
+  <button id="btnSample">载入样例书</button>
+  <span class="sep"></span>
+  <button id="btnUndo" title="撤销最近一次修改">↩ 撤销</button>
+  <span class="sep"></span>
+  <button id="btnExportEpub">导出 EPUB</button>
+  <button id="btnExportChanges">导出变更记录</button>
+  <button id="btnExportReport">导出问题报告</button>
+  <span id="toast"></span>
+</header>
+
+<main>
+  <!-- 左：章节树 -->
+  <section id="treePane" class="pane">
+    <h2>章节树 <span class="hint">拖拽调整顺序</span></h2>
+    <ul id="chapterTree" class="tree"></ul>
+  </section>
+
+  <!-- 中：排版预览 -->
+  <section id="previewPane" class="pane">
+    <h2>排版预览 <span class="hint">点击预览可定位节点</span></h2>
+    <iframe id="preview" title="章节预览"></iframe>
+  </section>
+
+  <!-- 右：标签页 -->
+  <section id="sidePane" class="pane">
+    <div class="tabs">
+      <button class="tab active" data-tab="order">朗读顺序</button>
+      <button class="tab" data-tab="issues">问题 <span id="issueCount" class="badge"></span></button>
+      <button class="tab" data-tab="landmarks">地标</button>
+      <button class="tab" data-tab="changes">变更</button>
+    </div>
+    <div id="tab-order" class="tabpage active">
+      <div id="orderList" class="list"></div>
+    </div>
+    <div id="tab-issues" class="tabpage">
+      <div id="issueList" class="list"></div>
+    </div>
+    <div id="tab-landmarks" class="tabpage">
+      <div id="landmarkList" class="list"></div>
+    </div>
+    <div id="tab-changes" class="tabpage">
+      <div id="changeList" class="list"></div>
+    </div>
+    <!-- 节点编辑器 -->
+    <div id="editor">
+      <h3>节点编辑 <code id="edPath"></code></h3>
+      <div id="edFields"></div>
+      <div class="edBtns">
+        <button id="edSave">保存修改</button>
+        <button id="edLocate">在预览中定位</button>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
