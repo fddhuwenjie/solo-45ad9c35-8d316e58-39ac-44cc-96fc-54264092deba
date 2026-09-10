@@ -56,6 +56,53 @@ def build_multi_h1_epub():
     return buf
 
 
+def build_table_book_epub():
+    """构造回归用书：表格中 headers 指向 td（无效表头引用）。"""
+    xhtml_head = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<html xmlns="http://www.w3.org/1999/xhtml" '
+                  'xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">'
+                  '<head><title>%s</title></head>')
+    ch1 = xhtml_head % "表格回归" + """
+<body><section epub:type="chapter">
+<h1 id="t1">表格回归</h1>
+<table>
+<caption>成绩表</caption>
+<tr><th id="h-name" scope="col">姓名</th><th id="h-score" scope="col">成绩</th></tr>
+<tr><td id="d-name">张三</td><td headers="d-name">90</td></tr>
+</table>
+</section></body></html>"""
+    nav = xhtml_head % "目录" + """
+<body><nav epub:type="toc"><h1>目录</h1>
+<ol><li><a href="ch1.xhtml">表格回归</a></li></ol>
+</nav></body></html>"""
+    opf = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">table-headers-td</dc:identifier>
+<dc:title>headers 指向 td 回归书</dc:title><dc:language>zh-CN</dc:language>
+</metadata>
+<manifest>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine><itemref idref="ch1"/></spine>
+</package>"""
+    container = """<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip",
+                   compress_type=zipfile.ZIP_STORED)
+        for name, data in [("META-INF/container.xml", container),
+                           ("content.opf", opf), ("nav.xhtml", nav),
+                           ("ch1.xhtml", ch1)]:
+            z.writestr(name, data.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+    buf.seek(0)
+    return buf
+
+
 def check(name, cond, extra=""):
     (PASS if cond else FAIL).append(name)
     print(("PASS  " if cond else "FAIL  ") + name + ("  " + str(extra) if extra else ""))
@@ -360,6 +407,48 @@ def main():
     check("多 h1 书导出后可重新导入", r.status_code == 200)
     toc4 = [i for i in r.get_json()["state"]["issues"] if i["check_name"] == "toc"]
     check("重导入后漏项判定一致", len(toc4) == 1 and "第二部分" in toc4[0]["message"])
+
+    # 14. 回归：headers→td 无效引用 + 前端对象负载（cells/links 为坐标键控对象）
+    r = c.post("/api/import", data={"file": (build_table_book_epub(), "tbl.epub")},
+               content_type="multipart/form-data")
+    check("headers→td 回归书可导入", r.status_code == 200, r.get_json().get("error"))
+    st4 = r.get_json()["state"]
+    bid4 = r.get_json()["book_id"]
+    t_iss = [i for i in st4["issues"] if i["check_name"] == "table_a11y"]
+    check("headers→td 报告无有效表头关联",
+          len(t_iss) == 1 and "未关联到有效表头" in t_iss[0]["message"],
+          [i["message"] for i in t_iss])
+    ch_t = st4["chapters"][0]
+    tpath = "html[1]/body[1]/section[1]/table[1]"
+    r = c.get(f"/api/books/{bid4}/table/{ch_t['id']}", query_string={"path": tpath})
+    mt = r.get_json()
+    cell11 = [x for x in mt["cells"] if x["row"] == 1 and x["col"] == 1][0]
+    check("headers→td 不进入朗读上下文",
+          cell11["covered_by"] == [] and "无关联表头" in cell11["reading"],
+          (cell11["covered_by"], cell11["reading"]))
+    r = c.get(f"/api/books/{bid4}/export/report")
+    check("问题报告含无有效表头关联", "未关联到有效表头" in r.get_data(as_text=True))
+
+    # 前端真实负载：cells/links 为坐标键控对象（切换 th/td、设置 scope、点选关联表头）
+    edits_obj = {
+        "cells": {"1,0": {"row": 1, "col": 0, "tag": "th", "scope": "row"}},
+        "links": {"1,1": {"row": 1, "col": 1, "keep": [], "headers": [[0, 0]]}},
+    }
+    r = c.post(f"/api/books/{bid4}/table/save",
+               json={"chapter_id": ch_t["id"], "path": tpath, "edits": edits_obj})
+    d = r.get_json()
+    check("对象负载保存成功（不再 500）", r.status_code == 200 and d["ok"])
+    check("对象负载保存后表格问题清零",
+          not any(i["check_name"] == "table_a11y" for i in d["state"]["issues"]))
+    html_t = c.get(f"/api/books/{bid4}/preview/ch1.xhtml").get_data(as_text=True)
+    check("XHTML 写回: td→th 并设置 scope",
+          "张三</th>" in html_t and 'scope="row"' in html_t)
+    check("XHTML 写回: 点选关联生成 headers", 'headers="h-name"' in html_t)
+    cell11 = [x for x in d["model"]["cells"] if x["row"] == 1 and x["col"] == 1][0]
+    check("修复后朗读上下文含表头", cell11["reading"] == "姓名：90", cell11["reading"])
+    r = c.get(f"/api/books/{bid4}/export/report")
+    check("问题报告同步更新（表格问题已消除）",
+          "未关联到有效表头" not in r.get_data(as_text=True))
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
     if FAIL:

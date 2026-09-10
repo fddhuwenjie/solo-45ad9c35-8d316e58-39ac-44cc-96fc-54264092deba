@@ -453,7 +453,9 @@ def _associations(model):
         if c["tag"] != "td":
             continue
         if c["headers"]:
-            covered_by[i] = [by_id[h] for h in c["headers"] if h in by_id]
+            # 显式 headers 只接受 <th> 作为表头目标；指向 td 的引用无效
+            covered_by[i] = [by_id[h] for h in c["headers"]
+                             if h in by_id and cells[by_id[h]]["tag"] == "th"]
         else:
             covered_by[i] = sorted(
                 (j for j in th_idx if _covers(cells[j], c)),
@@ -577,6 +579,16 @@ def check_table_el(book, href, table, table_path):
                           "headers 引用循环：%s"
                           % " ↔ ".join(coord(cells[i]) for i in scc)))
 
+    # headers 引用了表内 td：显式关联无效，该数据格实际没有任何表头
+    for i, c in enumerate(cells):
+        if c["tag"] != "td" or not c["headers"]:
+            continue
+        resolved = [by_id[h] for h in c["headers"] if h in by_id]
+        if resolved and not any(cells[j]["tag"] == "th" for j in resolved):
+            out.append(_issue(href, table_path, "table_a11y", "warning",
+                              "%s 的数据格「%s」的 headers 未关联到有效表头（指向的目标须为 <th>）"
+                              % (coord(c), c["text"][:20] or "（空）")))
+
     covered_by, _ = _associations(model)
     for i, c in enumerate(cells):
         if c["tag"] != "td" or c["headers"]:
@@ -652,8 +664,17 @@ def _ensure_cell_id(soup, tidx, cell):
     return hid
 
 
+def _iter_edits(coll):
+    """cells/links 负载契约：前端按坐标键控的对象（{"r,c": {...}}）或数组，
+    统一归一化为值列表迭代。"""
+    if isinstance(coll, dict):
+        return list(coll.values())
+    return list(coll or [])
+
+
 def apply_table_edits(book, href, table_path, edits, dirty=True):
     """应用表格工作区的一批编辑：caption / 逐格 tag、scope / 点选表头关联 / 批量推断。
+    cells 与 links 既接受数组，也接受前端按坐标键控的对象。
     推断与人工指定冲突时保留人工选择并在 conflicts 中说明原因。
     返回 {"summary": [已应用的改动说明], "conflicts": [...]}。"""
     soup = book.soup(href)
@@ -682,7 +703,7 @@ def apply_table_edits(book, href, table_path, edits, dirty=True):
                 cap.extract()
                 summary.append("删除 caption")
 
-    for ce in edits.get("cells") or []:
+    for ce in _iter_edits(edits.get("cells")):
         c = by_coord.get((ce.get("row"), ce.get("col")))
         if c is None:
             continue
@@ -702,7 +723,7 @@ def apply_table_edits(book, href, table_path, edits, dirty=True):
                 summary.append("%s scope: %s→%s" % (coord(c), cur or "（无）", v or "（无）"))
 
     tidx = soup.find_all("table").index(table) + 1
-    for lk in edits.get("links") or []:
+    for lk in _iter_edits(edits.get("links")):
         c = by_coord.get((lk.get("row"), lk.get("col")))
         if c is None:
             continue
