@@ -109,6 +109,17 @@ def _is_block(el):
     return getattr(el, "name", None) is not None
 
 
+def _is_media_wrapper(el):
+    """仅包一张图片/图表而无正文的 <p>（如 &lt;p&gt;&lt;img/&gt;&lt;/p&gt;），
+    在编号段之间视为图片类拦截元素。"""
+    if el is None or el.name != "p":
+        return False
+    if el.get_text(strip=True):
+        return False
+    media = el.find_all(("img", "svg", "figure", "table"))
+    return bool(media)
+
+
 def _direct(el, names=None):
     out = []
     for ch in el.find_all(recursive=False):
@@ -332,8 +343,10 @@ def analyze_lists(book, href):
             continue
         findings.extend(_check_existing_list(href, lst))
 
-    # 在每个块容器的直接子元素序列上识别候选段落 / 孤立 li
-    for parent in body.find_all(True):
+    # 在每个块容器的直接子元素序列上识别候选段落 / 孤立 li。
+    # body 自身也是容器：编号段落直接挂在 <body> 下（无 section 包裹）时同样要识别。
+    parents = [body] + [p for p in body.find_all(True)]
+    for parent in parents:
         if parent.name in ("ul", "ol", "nav") or parent.find_parent("nav"):
             continue
         kids = _direct(parent)
@@ -412,10 +425,11 @@ def analyze_lists(book, href):
                             i += 1
                             continue
                         break
-                    if nxt.name in INTERRUPTER_TAGS:
+                    if nxt.name in INTERRUPTER_TAGS or _is_media_wrapper(nxt):
                         j = i
                         gap = []
-                        while j < len(kids) and kids[j].name in INTERRUPTER_TAGS:
+                        while j < len(kids) and (kids[j].name in INTERRUPTER_TAGS
+                                                 or _is_media_wrapper(kids[j])):
                             gap.append(kids[j])
                             j += 1
                         if j < len(kids) and kids[j].name == "p":
@@ -685,26 +699,32 @@ def _guard_preservation(before_els, after_els, stripped=()):
                          % dom_path(before_els[0]))
 
 
-def region_commit(book, href, parent, before_els, after_els, stripped, before_html):
-    """校验守恒并构造逆操作。
-
-    before_els 仅用于操作前的连续/同父校验（调用方须在改动前完成）；
-    此处的守恒比对基于 before_html 解析出的游离快照，因为 before_els 此刻
-    可能已被改名（p→li）或搬入新列表。"""
-    if after_els:
-        _ensure_consecutive(parent, after_els)
+def _parse_shadows(before_html):
     shadows = []
     for html in before_html:
         frag = BeautifulSoup(html, "xml")
         el = next((c for c in frag.contents if _is_block(c)), None)
         if el is not None:
             shadows.append(el)
+    return shadows
+
+
+def region_commit(book, href, parent, after_els, stripped, before_html,
+                  empty_index=None):
+    """校验守恒并构造逆操作。
+
+    before_html 是操作前序列化的完整区间（含随后被并入 li 的标题/图片/注释），
+    守恒比对基于它解析出的游离快照——此刻真实的 before 节点可能已被改名/搬移。
+    after_els 是操作后父节点下的连续兄弟区间（被吸收的拦截元素已在其后代中）。"""
+    if after_els:
+        _ensure_consecutive(parent, after_els)
+    shadows = _parse_shadows(before_html)
     _guard_preservation(shadows, after_els, stripped)
     return {
         "kind": "list", "chapter": href,
         "parent_path": dom_path(parent),
         "index0": _element_index(parent, after_els[0]) if after_els
-        else (len(_direct(parent))),
+        else (empty_index if empty_index is not None else len(_direct(parent))),
         "after_paths": [dom_path(e) for e in after_els],
         "before_html": before_html,
         "affected": ["list_a11y", "heading_hierarchy", "duplicate_id"],
@@ -712,7 +732,7 @@ def region_commit(book, href, parent, before_els, after_els, stripped, before_ht
 
 
 def restore_region(book, href, parent_path, index0, after_paths, before_html):
-    """撤销：用 before_html 整体替换当前连续区间。"""
+    """撤销：用 before_html（含被吸收元素）完整替换当前连续区间，节点不丢失。"""
     soup = book.soup(href)
     parent = find_by_path(soup, parent_path) or soup.find("body")
     after_els = []
@@ -721,30 +741,16 @@ def restore_region(book, href, parent_path, index0, after_paths, before_html):
         if el is None:
             raise ValueError("撤销定位失败: %s" % p)
         after_els.append(el)
-    anchor = None
-    insert_pos = None  # 仍挂在树上的定位节点（先于任何 extract 捕获）
+    insert_before = None  # 区间之后仍挂在树上的兄弟（先于 extract 捕获，保证原位复原）
     if after_els:
         _ensure_consecutive(parent, after_els)
-        anchor = after_els[0]
-        insert_pos = anchor.find_previous_sibling(True)
+        insert_before = after_els[-1].find_next_sibling(True)
     for el in after_els:
         el.extract()
-    new_els = []
-    for html in before_html:
-        frag = BeautifulSoup(html, "xml")
-        el = next((c for c in frag.contents if _is_block(c)), None)
-        if el is not None:
-            new_els.append(el)
-    if anchor is not None:
-        # anchor 已被摘出：用它原来的前一个兄弟定位，前一个兄弟也没了则插到段首
-        if insert_pos is not None and insert_pos.parent is parent:
-            cursor = insert_pos
-            for el in new_els:
-                cursor.insert_after(el)
-                cursor = el
-        else:
-            for el in reversed(new_els):
-                parent.insert(0, el)
+    new_els = _parse_shadows(before_html)
+    if insert_before is not None and insert_before.parent is parent:
+        for el in new_els:
+            insert_before.insert_before(el)
     else:
         kids = _direct(parent)
         if index0 < len(kids):
@@ -754,6 +760,33 @@ def restore_region(book, href, parent_path, index0, after_paths, before_html):
             for el in new_els:
                 parent.append(el)
     book.mark_dirty(href)
+
+
+def _chapter_snapshot(soup):
+    return str(soup)
+
+
+def _rollback_chapter(soup, snapshot):
+    """操作失败时把整章文档树重置回操作前，保证报错不留任何 DOM 改动。"""
+    fresh = BeautifulSoup(snapshot, "xml")
+    soup.clear()
+    for c in list(fresh.contents):
+        soup.append(c.extract())
+
+
+def transactional(fn):
+    """装饰器：被装饰函数操作单章文档树，抛出任何异常前先回滚整章。"""
+    def wrapper(book, href, *args, **kwargs):
+        soup = book.soup(href)
+        snapshot = _chapter_snapshot(soup)
+        try:
+            return fn(book, href, *args, **kwargs)
+        except BaseException:
+            _rollback_chapter(soup, snapshot)
+            raise
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
 
 
 def pretty_region(els):
@@ -866,6 +899,7 @@ def _p_to_lis(soup, e, strip_markers, stripped):
     return lis
 
 
+@transactional
 def create_list(book, href, paths, list_type="ul", start=None,
                 strip_markers=True, blocks=None):
     """把同一父节点下连续的 p/孤立 li（可含拦截元素）组合为 ul/ol。"""
@@ -956,12 +990,7 @@ def create_list(book, href, paths, list_type="ul", start=None,
         cursor = el
 
     after_els = list(moved_before) + [lst] + list(moved_after)
-    span_set = {e for e in before_els
-                if not any(b is e for b, pl in block_els if pl == "into_prev")}
-    span = [e for e in before_els if e in span_set]
-    span_html = [h for e, h in zip(before_els, before_html) if e in span_set]
-    inverse = region_commit(book, href, parent, span, after_els,
-                            stripped, span_html)
+    inverse = region_commit(book, href, parent, after_els, stripped, before_html)
     book.mark_dirty(href)
     summary = ["组合为 <%s>，含 %d 项" % (list_type, len(new_items))]
     n_markers = len([s for s in stripped if s])
@@ -990,8 +1019,11 @@ def _find_li(soup, path):
     return el
 
 
+@transactional
 def apply_op(book, href, path, op, params=None):
-    """对既有列表应用一个操作，返回 (inverse, new_path, summary)。"""
+    """对既有列表应用一个操作，返回 (inverse, new_path, summary)。
+
+    任何失败都先把整章文档树回滚到操作前，绝不留下半截 DOM 改动。"""
     params = params or {}
     soup = book.soup(href)
     lst = _get_list(soup, path)
@@ -1005,13 +1037,15 @@ def apply_op(book, href, path, op, params=None):
     }.get(op)
     if fn is None:
         raise ValueError("未知列表操作: %s" % op)
-    before_els, after_els, stripped, summary = fn(book, soup, lst, parent, params)
-    # 各 _op_* 在改动前序列化 before_html；before_els 此刻可能已被改名/搬移，
-    # 仅保留其列表结构用于逆操作定位，真正守恒比对基于 before_html 的游离快照。
-    before_html = before_els if before_els and isinstance(before_els[0], str) \
-        else [str(e) for e in before_els]
-    inverse = region_commit(book, href, parent, before_els, after_els,
-                            stripped, before_html)
+    # 删除型操作（删空列表）：区间为空，需在摘出前记住被删元素在父节点中的原位置
+    empty_index = None
+    if op == "remove_empty":
+        kids = _direct(parent)
+        empty_index = kids.index(lst) if lst in kids else None
+    before_html, after_els, stripped, summary = fn(
+        book, soup, lst, parent, params)
+    inverse = region_commit(book, href, parent, after_els, stripped, before_html,
+                            empty_index=empty_index)
     new_path = dom_path(after_els[0]) if after_els else ""
     book.mark_dirty(href)
     return inverse, new_path, summary
@@ -1158,9 +1192,18 @@ def _op_split(book, soup, lst, parent, params):
     second = soup.new_tag(lst.name)
     if lst.name == "ol":
         second["start"] = str(_ordinal_of(lst, li))
-    li.insert_before(second)
+    # 记录 lst 在父节点中的位置，随后整体重建该位置：先 second 占位再挂 lst，
+    # 绕开“second 含原 lst 兄弟项时 insert_after 定位错乱”的问题。
+    anchor = lst.find_next_sibling(True)
+    lst.extract()
     for x in lis[i:]:
         second.append(x)
+    if anchor is not None and anchor.parent is parent:
+        anchor.insert_before(second)
+        second.insert_before(lst)
+    else:
+        parent.append(second)
+        second.insert_before(lst)
     return before_html, [lst, second], [], [
         "拆为两个 <%s>（新列表从 %s 开始）" % (lst.name, second.get("start") or "1")]
 
@@ -1222,14 +1265,11 @@ def _op_join(book, soup, lst, parent, params):
     span = [target] + blockers + [lst] if side == "before" \
         else [lst] + blockers + [target]
     span = sorted(set(span), key=lambda e: _element_index(parent, e))
-    before_html = _begin_span(parent, span)
-    blockers_after, absorbed = [], []
+    before_html = _begin_span(parent, span)  # 含被吸收的拦截元素，撤销时完整复原
+    blockers_after = []
     for blocker in blockers:
-        moved, is_absorbed = _adopt_blocker(lst, blocker, side, placement)
+        moved, _ = _adopt_blocker(lst, blocker, side, placement)
         blockers_after.extend(moved)
-        if is_absorbed:
-            absorbed.append(blocker)
-    span_html = [h for e, h in zip(span, before_html) if e not in absorbed]
     if side == "before":
         _merge_next(soup, target, lst)
         head = target
@@ -1238,7 +1278,7 @@ def _op_join(book, soup, lst, parent, params):
         head = lst
     after = sorted(set(blockers_after + [head]),
                    key=lambda e: _element_index(parent, e))
-    return span_html, after, [], ["接续相邻 <%s>%s"
+    return before_html, after, [], ["接续相邻 <%s>%s"
                                % (lst.name,
                                   "（并处置截断元素）" if blockers else "")]
 
@@ -1268,10 +1308,9 @@ def _op_extend(book, soup, lst, parent, params):
         return _op_join(book, soup, lst, parent, {"side": side})
     if neighbor.name in INTERRUPTER_TAGS:
         before_html_all = _begin_span(parent, [lst, neighbor])
-        moved, is_absorbed = _adopt_blocker(lst, neighbor, side, placement)
-        span_html = before_html_all if not is_absorbed else before_html_all[:1]
+        moved, _ = _adopt_blocker(lst, neighbor, side, placement)
         after = sorted(set(moved + [lst]), key=lambda e: _element_index(parent, e))
-        return span_html, after, [], ["把截断元素 <%s> 纳入边界" % neighbor.name]
+        return before_html_all, after, [], ["把截断元素 <%s> 纳入边界" % neighbor.name]
     if neighbor.name not in CONVERTIBLE_TAGS or (
             neighbor.name == "li" and neighbor.parent.name in LIST_TAGS):
         raise ValueError("相邻 <%s>「%s」不适合作为列表项，已拒绝；位置：%s"

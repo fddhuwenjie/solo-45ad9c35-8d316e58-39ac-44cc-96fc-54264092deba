@@ -30,7 +30,10 @@
 
   <!-- 中：排版预览 -->
   <section id="previewPane" class="pane">
-    <h2>排版预览 <span class="hint">点击预览可定位节点</span></h2>
+    <h2>排版预览
+      <span class="hint">点击定位节点</span>
+      <button id="btnListSelect" class="mini" title="在预览中拖选连续段落/项目，组合为 ul/ol">▢ 框选组合列表</button>
+    </h2>
     <iframe id="preview" title="章节预览"></iframe>
   </section>
 
@@ -89,7 +92,52 @@
   </div>
 </div>
 
+<!-- 列表工作区 -->
+<div id="listModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3>列表工作区</h3>
+      <code id="lwPath"></code>
+      <span class="sep"></span>
+      <button id="lwClose">✕ 关闭</button>
+    </div>
+    <div class="lw-toolbar">
+      <span id="lwMode" class="lw-mode"></span>
+      <label id="lwTypeWrap">类型
+        <select id="lwType"><option value="ul">ul 无序</option><option value="ol">ol 有序</option></select>
+      </label>
+      <label id="lwStartWrap" class="hidden">起始序号 <input id="lwStart" type="number" min="1" style="width:64px"></label>
+      <label class="lw-check"><input id="lwStrip" type="checkbox" checked> 剥离行首编号/符号</label>
+      <span class="sep"></span>
+      <button id="lwCreate" class="primary">组合为列表</button>
+      <span id="lwGap" class="lw-gap"></span>
+    </div>
+    <div class="lw-body">
+      <div id="lwMain">
+        <div class="lw-items-head">
+          <span>项目（点击选中；→ 缩进 / ← 提升层级）</span>
+          <span id="lwItemTools" class="lw-itemtools"></span>
+        </div>
+        <div id="lwItems"></div>
+        <div class="lw-boundaries">
+          <div class="lw-bside" id="lwPrev"></div>
+          <div class="lw-bside" id="lwNext"></div>
+        </div>
+      </div>
+      <div id="lwSide">
+        <div class="lw-sec"><b>DOM 变化（左：提交前 ｜ 右：提交后）</b>
+          <div class="lw-diff"><pre id="lwBefore"></pre><pre id="lwAfter"></pre></div>
+        </div>
+        <div class="lw-sec"><b>模拟朗读</b><pre id="lwReading" class="lw-reading"></pre></div>
+        <div class="lw-sec" id="lwIssues"></div>
+        <div class="lw-sec" id="lwBlocks"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 <script src="/static/table.js"></script>
+<script src="/static/list.js"></script>
 </body>
 </html>

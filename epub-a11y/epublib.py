@@ -853,15 +853,7 @@ CHECKS = {
     "toc":                {"scope": "book",    "fn": ch_toc},
     "table_a11y":         {"scope": "chapter", "fn": ch_table_a11y},
 }
-
-# 列表语义检查在 listlib 中实现（检查端与编辑工作区共用同一组发现），
-# 因依赖顺序延后注册。
-def _register_list_check():
-    import listlib
-    CHECKS["list_a11y"] = {"scope": "chapter", "fn": listlib.ch_list_a11y}
-
-
-_register_list_check()
+# list_a11y 检查由 listlib 提供，在 app 模块导入时注册（避免循环导入）。
 
 # 编辑动作 → 受影响的检查（只重跑这些）
 AFFECTED_BY_ATTR = {

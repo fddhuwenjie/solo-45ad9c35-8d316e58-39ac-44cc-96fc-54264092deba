@@ -6,6 +6,7 @@ const S = {
   chapters: [],
   nodes: {},          // chapterId -> [node]
   htmlLang: {},       // chapterId -> <html> 的 lang
+  candidates: {},     // chapterId -> 列表候选 {candidates, lists}
   issues: [],
   landmarks: [],
   changes: [],
@@ -13,6 +14,7 @@ const S = {
   currentChapter: null,
   selected: null,     // {chapterId, path}
   pendingHighlight: null,
+  listSelectMode: false,  // 预览框选模式：框选连续节点以组合列表
 };
 
 const $ = (s) => document.querySelector(s);
@@ -38,6 +40,11 @@ function toast(msg, isErr = false) {
 }
 
 /* ---------------- 书籍加载 ---------------- */
+async function refreshCandidates(chapterId) {
+  S.candidates[chapterId] =
+    await api(`/api/books/${S.bookId}/list/candidates/${chapterId}`);
+}
+
 async function loadBooks() {
   const books = await api("/api/books");
   const sel = $("#bookSelect");
@@ -50,11 +57,15 @@ async function openBook(id) {
   const st = await api(`/api/books/${id}`);
   S.bookId = id;
   applyState(st);
-  S.nodes = {}; S.htmlLang = {};
+  S.nodes = {}; S.htmlLang = {}; S.candidates = {};
   $("#tableModal").classList.remove("open");
+  $("#listModal").classList.remove("open");
   await Promise.all(S.chapters.map(async (c) => {
     const d = await api(`/api/books/${id}/chapters/${c.id}/nodes`);
     S.nodes[c.id] = d.nodes; S.htmlLang[c.id] = d.html_lang;
+  }));
+  await Promise.all(S.chapters.map(async (c) => {
+    S.candidates[c.id] = await api(`/api/books/${id}/list/candidates/${c.id}`);
   }));
   $("#bookSelect").value = id;
   renderAll();
@@ -189,27 +200,76 @@ function reloadPreview() {
   if (f.src) f.src = f.src;  // 强制刷新以反映最新编辑
 }
 
+function postPreview(msg) {
+  const w = $("#preview").contentWindow;
+  if (w) w.postMessage(msg, "*");
+}
+
+function setListSelectMode(on) {
+  S.listSelectMode = on;
+  $("#btnListSelect").classList.toggle("active", on);
+  postPreview({ type: "listSelectMode", on });
+}
+
+function sendListMarks() {
+  const cid = S.currentChapter;
+  const data = S.candidates[cid] || { candidates: [], lists: [] };
+  postPreview({
+    type: "listMarks",
+    candidates: (data.candidates || []).map((c) => c.item_paths),
+    lists: data.lists || [],
+  });
+}
+
+$("#btnListSelect").onclick = () => {
+  setListSelectMode(!S.listSelectMode);
+  if (S.listSelectMode)
+    toast("框选模式：依次点击连续区间的第一个和最后一个节点（同父兄弟）");
+};
+
 $("#preview").addEventListener("load", () => {
   if (S.pendingHighlight) {
     $("#preview").contentWindow.postMessage(
       { type: "highlight", path: S.pendingHighlight }, "*");
     S.pendingHighlight = null;
   }
+  postPreview({ type: "listSelectMode", on: S.listSelectMode });
+  sendListMarks();
 });
 
 window.addEventListener("message", (e) => {
-  if (!e.data || e.data.type !== "locate") return;
-  // 预览中点击 → 向上回溯找到最近的已索引节点
-  let path = e.data.path;
-  const cid = S.currentChapter;
-  const paths = new Set((S.nodes[cid] || []).map((n) => n.dom_path));
-  while (path && !paths.has(path)) {
-    const i = path.lastIndexOf("/");
-    path = i > 0 ? path.slice(0, i) : "";
+  if (!e.data || e.data.type === "locate") {
+    if (e.data.type !== "locate") return;
+    // 预览中点击 → 向上回溯找到最近的已索引节点
+    let path = e.data.path;
+    const cid = S.currentChapter;
+    const paths = new Set((S.nodes[cid] || []).map((n) => n.dom_path));
+    while (path && !paths.has(path)) {
+      const i = path.lastIndexOf("/");
+      path = i > 0 ? path.slice(0, i) : "";
+    }
+    if (path) selectNode(cid, path, false);
+    else toast("点击位置不是可索引的阅读节点", true);
+    return;
   }
-  if (path) selectNode(cid, path, false);
-  else toast("点击位置不是可索引的阅读节点", true);
+  if (e.data.type === "listPick") {
+    handleListPick(e.data);
+  }
 });
+
+function handleListPick(d) {
+  const cid = S.currentChapter;
+  setListSelectMode(false);
+  if (!d.sameParent || !d.paths || d.paths.length < 1) {
+    toast("框选的两个节点必须是同一父节点下的连续兄弟；请重新框选", true);
+    return;
+  }
+  // 只保留可作为列表项/拦截元素的已索引节点
+  const indexed = new Set((S.nodes[cid] || []).map((n) => n.dom_path));
+  const paths = d.paths.filter((p) => indexed.has(p));
+  if (paths.length < 1) { toast("框选范围内没有可组合的节点", true); return; }
+  openListWorkspaceCreate(cid, paths, null);
+}
 
 function highlightInPreview(path) {
   const w = $("#preview").contentWindow;
@@ -258,9 +318,13 @@ function openEditor(n) {
     </datalist></label>`);
   if (n.tag === "table")
     F.push(`<button id="f_table_ws" type="button">打开表格工作区（表头/合并/关联）</button>`);
+  if (n.tag === "ul" || n.tag === "ol")
+    F.push(`<button id="f_list_ws" type="button">打开列表工作区（层级/接续/起始序号）</button>`);
   $("#edFields").innerHTML = F.join("");
   const twsBtn = $("#f_table_ws");
   if (twsBtn) twsBtn.onclick = () => openTableWorkspace(S.selected.chapterId, n.dom_path);
+  const lwsBtn = $("#f_list_ws");
+  if (lwsBtn) lwsBtn.onclick = () => openListWorkspaceEdit(S.selected.chapterId, n.dom_path);
   $("#edSave").onclick = () => saveEditor(n);
   $("#edLocate").onclick = () => highlightInPreview(n.dom_path);
 }
@@ -329,6 +393,8 @@ function renderIssues() {
       if (!ch) return;
       if (el.dataset.check === "table_a11y" && el.dataset.path)
         openTableWorkspace(ch.id, el.dataset.path);  // 表格问题 → 打开表格工作区
+      else if (el.dataset.check === "list_a11y")
+        openListIssue(ch.id, el.dataset.path);       // 列表问题 → 打开列表工作区
       else if (el.dataset.path) selectNode(ch.id, el.dataset.path);
       else selectChapter(ch.id);
     };

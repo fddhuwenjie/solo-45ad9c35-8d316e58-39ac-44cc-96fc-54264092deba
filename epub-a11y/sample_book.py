@@ -12,6 +12,8 @@
 - 错序侧栏：第一章 aside.sidebar 位于其所属小节标题之前，第三章侧栏在引言段之前
 - 第四章复杂表格：表A 缺 caption、首行视觉表头仍为 td、headers 引用失效、数据格无法关联表头；
   表B scope 与合并结构冲突、headers 引用循环；表C 为规范用法对照（无问题）
+- 第五章列表语义：连续编号段落伪装成有序列表、单段 <br> 拼行、孤立 li、
+  空列表、ol start/可见编号不符、非法直接嵌套、相邻 ol 被标题与图片截断
 """
 import base64
 import os
@@ -95,6 +97,52 @@ CH4 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第四章 数据表格') 
 </section>
 </body></html>"""
 
+CH5 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第五章 列表') + """
+<body>
+<section epub:type="chapter" id="s5">
+<h1 id="ch5">第五章 列表</h1>
+<p>本章演示“视觉上是列表、读屏却读不出项目边界”的各种排版。</p>
+
+<h2 id="ch5s1">安装步骤（编号段落）</h2>
+<p>1. 下载安装包<a id="dl-link" href="http://example.com/dl">前往下载页</a>。</p>
+<p>2. 双击运行安装程序。</p>
+<h3 id="ch5fig">图 1 安装向导截图</h3>
+<p><img id="setup-img" src="images/deco.png" alt="安装向导截图" width="1" height="1"/></p>
+<p>3. 按向导提示完成安装并重启。</p>
+
+<h2 id="ch5s2">注意事项（项目符号段落）</h2>
+<p>• 请备份重要数据。</p>
+<p>• 安装过程中不要断电。</p>
+<p style="margin-left:2em">◦ 笔记本电脑请接上电源。</p>
+<p style="margin-left:4em">· 长时间安装建议关闭休眠。</p>
+
+<h2 id="ch5s3">单段内换行拼成的列表</h2>
+<p>（一）核对姓名<br/>（二）核对证件号<br/>（三）签字确认</p>
+
+<h2 id="ch5s4">既有列表的问题</h2>
+<p>下面是空列表：</p>
+<ul></ul>
+<p>下面的有序列表 start 与可见编号不符（start=5，首项却写“1.”）：</p>
+<ol start="5">
+<li>1. 第一步可见编号与播报序号不一致。</li>
+<li>2. 第二步。</li>
+</ol>
+<h3 id="ch5cut">小贴士</h3>
+<ol start="3">
+<li>3. 这其实是被标题截断的同一张列表，应接续上一段。</li>
+</ol>
+<p>下面是非法嵌套（子列表直接放在 ul 里、列表中混入段落）：</p>
+<ul>
+<li>合法的第一项。</li>
+<p>这是错放在 ul 里的段落。</p>
+<ul><li>被直接塞进 ul 的子项。</li></ul>
+</ul>
+<p>下面是两个未包在列表里的孤立 li：</p>
+<li id="orphan1">孤立项目甲</li>
+<li id="orphan2">孤立项目乙</li>
+</section>
+</body></html>"""
+
 NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <body>
 <nav epub:type="toc" id="toc">
@@ -104,6 +152,7 @@ NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <li><a href="ch3.xhtml">第三章 结果</a></li>
 <li><a href="ch2.xhtml">第二章 方法</a></li>
 <li><a href="ch4.xhtml">第四章 数据表格</a></li>
+<li><a href="ch5.xhtml">第五章 列表</a></li>
 </ol>
 </nav>
 <nav epub:type="landmarks" id="landmarks">
@@ -128,11 +177,12 @@ OPF = """<?xml version="1.0" encoding="utf-8"?>
 <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch4" href="ch4.xhtml" media-type="application/xhtml+xml"/>
+<item id="ch5" href="ch5.xhtml" media-type="application/xhtml+xml"/>
 <item id="css" href="css/style.css" media-type="text/css"/>
 <item id="img1" href="images/photo.png" media-type="image/png"/>
 <item id="img2" href="images/deco.png" media-type="image/png"/>
 </manifest>
-<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/><itemref idref="ch4"/></spine>
+<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/><itemref idref="ch4"/><itemref idref="ch5"/></spine>
 </package>"""
 
 CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
@@ -158,6 +208,7 @@ def create_sample(path):
             ("ch2.xhtml", CH2),
             ("ch3.xhtml", CH3),
             ("ch4.xhtml", CH4),
+            ("ch5.xhtml", CH5),
             ("css/style.css", CSS),
         ]:
             z.writestr(name, data.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)

@@ -26,6 +26,9 @@ from listlib import (candidates_json as list_candidates_json,
                      restore_region, pretty_region)
 from sample_book import create_sample
 
+# 列表语义检查（检查端与列表工作区共用 listlib 的同一组发现）
+CHECKS["list_a11y"] = {"scope": "chapter", "fn": listlib.ch_list_a11y}
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
 BOOKS_DIR = os.path.join(DATA, "books")
@@ -461,7 +464,13 @@ def undo(book_id):
 
 # ---------------- 预览与资源 ----------------
 PREVIEW_SCRIPT = """
-<style>.a11y-hl{outline:3px solid #e0245e !important;outline-offset:2px;}</style>
+<style>
+.a11y-hl{outline:3px solid #e0245e !important;outline-offset:2px;}
+.a11y-cand{outline:2px dashed #0969da !important;outline-offset:1px;background:rgba(9,105,218,.06);}
+.a11y-list{outline:2px solid #1a7f37 !important;outline-offset:1px;}
+.a11y-pick{outline:3px solid #bf3989 !important;outline-offset:1px;background:rgba(191,57,137,.10) !important;}
+body.a11y-selecting, body.a11y-selecting *{cursor:crosshair !important;}
+</style>
 <script>
 function pathOf(el){
   var parts=[];
@@ -483,16 +492,73 @@ function findByPath(path){
   }
   return cur;
 }
-var last=null;
+var LIST_TAGS={ul:1,ol:1}, ITEM_TAGS={p:1,li:1,div:1};
+var last=null, selecting=false, pickStart=null, pickEnd=null;
+function clearMarks(cls){ document.querySelectorAll('.'+cls).forEach(function(el){el.classList.remove(cls);}); }
+function setMarks(paths, cls, on){
+  paths.forEach(function(p){ var el=findByPath(p); if(el) el.classList.toggle(cls, !!on); });
+}
+function orderedBlockSiblings(){
+  // 取 body 内所有可列表化块的路径（扁平），供父页面框选时取连续区间
+  var out=[];
+  document.querySelectorAll('p,li,div,ul,ol,h1,h2,h3,h4,h5,h6,img,figure,aside').forEach(function(el){
+    if(el.closest('nav')) return;
+    out.push(pathOf(el));
+  });
+  return out;
+}
+function topmostPick(el){
+  // 框选命中时回溯到一个可作为列表项的顶层块（p/孤立li/div），避免选到行内元素
+  var node=el;
+  while(node && node.nodeType===1 && node.tagName.toLowerCase()!=='body'){
+    var t=node.tagName.toLowerCase();
+    if(ITEM_TAGS[t] && !(node.parentElement && LIST_TAGS[node.parentElement.tagName.toLowerCase()]))
+      return node;
+    if(LIST_TAGS[t]) return node;
+    node=node.parentElement;
+  }
+  return el;
+}
 document.addEventListener('click', function(e){
   e.preventDefault(); e.stopPropagation();
+  if(selecting){
+    var el=topmostPick(e.target);
+    if(!pickStart){ pickStart=el; el.classList.add('a11y-pick'); }
+    else { pickEnd=el; finishPick(); }
+    return;
+  }
   parent.postMessage({type:'locate', path:pathOf(e.target)}, '*');
 }, true);
+function finishPick(){
+  var a=pickStart, b=pickEnd;
+  // 必须同父；收集二者之间的兄弟区间
+  var paths=null;
+  if(a && b && a.parentElement===b.parentElement){
+    var kids=Array.prototype.filter.call(a.parentElement.children,function(n){return n.nodeType===1;});
+    var ia=kids.indexOf(a), ib=kids.indexOf(b); if(ia>ib){var t=ia;ia=ib;ib=t;}
+    paths=kids.slice(ia,ib+1).map(pathOf);
+  }
+  parent.postMessage({type:'listPick', sameParent:a&&b?a.parentElement===b.parentElement:false,
+                      anchor: a?pathOf(a):null, paths:paths}, '*');
+  clearMarks('a11y-pick'); pickStart=pickEnd=null;
+}
 window.addEventListener('message', function(e){
-  if(e.data && e.data.type==='highlight'){
-    var el=findByPath(e.data.path);
+  var d=e.data; if(!d) return;
+  if(d.type==='highlight'){
+    var el=findByPath(d.path);
     if(last) last.classList.remove('a11y-hl');
     if(el){ el.classList.add('a11y-hl'); el.scrollIntoView({block:'center'}); last=el; }
+  } else if(d.type==='listSelectMode'){
+    selecting=!!d.on; pickStart=pickEnd=null; clearMarks('a11y-pick');
+    document.body.classList.toggle('a11y-selecting', selecting);
+  } else if(d.type==='listMarks'){
+    clearMarks('a11y-cand'); clearMarks('a11y-list');
+    (d.candidates||[]).forEach(function(paths,ci){
+      paths.forEach(function(p){ var el=findByPath(p); if(el){ el.classList.add('a11y-cand'); el.setAttribute('title','疑似列表项（点击问题面板中的该项可一键组合）'); } });
+    });
+    (d.lists||[]).forEach(function(p){ var el=findByPath(p); if(el){ el.classList.add('a11y-list'); el.setAttribute('title','列表（可在列表工作区校修）'); } });
+  } else if(d.type==='clearMarks'){
+    clearMarks('a11y-cand'); clearMarks('a11y-list'); clearMarks('a11y-pick');
   }
 });
 </script>
