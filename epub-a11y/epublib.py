@@ -356,15 +356,20 @@ def ch_toc(book):
     for sp in book.spine:
         if sp not in book.raw:
             continue
+        seen_first_h1 = False
         for h in book.soup(sp).find_all(re.compile("^h[12]$")):
             if h.find_parent("nav"):
                 continue
+            # 整章链接（无 #fragment）只覆盖章内第一个 h1（文档顶端主标题）；
+            # 同章后续的 h1 与所有 h2 都必须有显式 #id 目录条目
+            is_first_h1 = h.name == "h1" and not seen_first_h1
+            if h.name == "h1":
+                seen_first_h1 = True
             hid = h.get("id")
             if not hid:
                 continue
-            # h1 可被「整章链接」覆盖；h2 小节必须在目录中有显式 #id 条目
             explicit = "%s#%s" % (sp, hid) in referenced
-            covered = explicit or (h.name == "h1" and sp in referenced_docs)
+            covered = explicit or (is_first_h1 and sp in referenced_docs)
             if not covered:
                 out.append(_issue(sp, dom_path(h), "toc", "warning",
                                   "标题「%s」未收录进目录"

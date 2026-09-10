@@ -13,6 +13,49 @@ from app import app
 PASS, FAIL = [], []
 
 
+def build_multi_h1_epub():
+    """构造回归用书：nav 只有整章链接，章内含两个带 id 的 h1。"""
+    xhtml_head = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                  '<html xmlns="http://www.w3.org/1999/xhtml" '
+                  'xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-CN">'
+                  '<head><title>%s</title></head>')
+    ch1 = xhtml_head % "合集" + """
+<body><section epub:type="chapter">
+<h1 id="part1">第一部分</h1><p>内容一</p>
+<h1 id="part2">第二部分</h1><p>内容二</p>
+</section></body></html>"""
+    nav = xhtml_head % "目录" + """
+<body><nav epub:type="toc"><h1>目录</h1>
+<ol><li><a href="ch1.xhtml">合集</a></li></ol>
+</nav></body></html>"""
+    opf = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="uid">multi-h1</dc:identifier>
+<dc:title>多 h1 测试书</dc:title><dc:language>zh-CN</dc:language>
+</metadata>
+<manifest>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine><itemref idref="ch1"/></spine>
+</package>"""
+    container = """<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip",
+                   compress_type=zipfile.ZIP_STORED)
+        for name, data in [("META-INF/container.xml", container),
+                           ("content.opf", opf), ("nav.xhtml", nav),
+                           ("ch1.xhtml", ch1)]:
+            z.writestr(name, data.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+    buf.seek(0)
+    return buf
+
+
 def check(name, cond, extra=""):
     (PASS if cond else FAIL).append(name)
     print(("PASS  " if cond else "FAIL  ") + name + ("  " + str(extra) if extra else ""))
@@ -198,6 +241,29 @@ def main():
     check("导出变更记录 CSV", r.status_code == 200 and "时间".encode("utf-8-sig") in r.data)
     r = c.get(f"/api/books/{bid}/export/report")
     check("导出问题报告 HTML", r.status_code == 200 and "未解决问题报告".encode() in r.data)
+
+    # 13. 回归：目录只有整章链接、同章含多个 h1
+    #     第一个 h1 被整章链接覆盖（不误报），后续 h1 必须报目录漏项
+    r = c.post("/api/import", data={"file": (build_multi_h1_epub(), "multi.epub")},
+               content_type="multipart/form-data")
+    check("多 h1 测试书可导入", r.status_code == 200, r.get_json().get("error"))
+    st3 = r.get_json()["state"]
+    toc3 = [i for i in st3["issues"] if i["check_name"] == "toc"]
+    check("同章第二个 h1 报目录漏项",
+          any("第二部分" in i["message"] for i in toc3),
+          [i["message"] for i in toc3])
+    check("整章链接覆盖的第一个 h1 不误报",
+          not any("第一部分" in i["message"] for i in toc3))
+    check("多 h1 书仅 1 项目录问题", len(toc3) == 1, len(toc3))
+    # 导出的多 h1 书仍可重新导入
+    bid3 = r.get_json()["book_id"]
+    r = c.get(f"/api/books/{bid3}/export/epub")
+    check("多 h1 书可导出", r.status_code == 200 and r.data[:2] == b"PK")
+    r = c.post("/api/import", data={"file": (io.BytesIO(r.data), "multi_fixed.epub")},
+               content_type="multipart/form-data")
+    check("多 h1 书导出后可重新导入", r.status_code == 200)
+    toc4 = [i for i in r.get_json()["state"]["issues"] if i["check_name"] == "toc"]
+    check("重导入后漏项判定一致", len(toc4) == 1 and "第二部分" in toc4[0]["message"])
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
     if FAIL:
