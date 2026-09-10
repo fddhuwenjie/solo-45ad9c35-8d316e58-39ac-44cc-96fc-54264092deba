@@ -15,11 +15,15 @@ from flask import (Flask, jsonify, render_template, request, send_file,
 
 import db
 import epublib
+import listlib
 from epublib import Book, CHECK_LABELS, CHECKS, AFFECTED_BY_ATTR, \
     AFFECTED_BY_MOVE, AFFECTED_BY_SPINE, apply_updates, move_node, undo_move, \
     reorder_spine, rebuild_landmarks_nav, find_by_path, dom_path, \
     apply_table_edits, preview_table_edits, restore_table, check_one_table, \
     table_model_json
+from listlib import (candidates_json as list_candidates_json,
+                     list_model_json, create_list, apply_op,
+                     restore_region, pretty_region)
 from sample_book import create_sample
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -328,6 +332,94 @@ def table_save(book_id):
                     "state": state(book_id)})
 
 
+# ---------------- 列表工作区 ----------------
+LIST_AFFECTED = ["list_a11y", "heading_hierarchy", "duplicate_id"]
+
+
+@app.route("/api/books/<int:book_id>/list/candidates/<int:chapter_id>")
+def list_candidates(book_id, chapter_id):
+    """本章列表候选与既有列表（供预览框选高亮、问题面板跳转）。"""
+    book = get_book(book_id)
+    href = chapter_href(book_id, chapter_id)
+    return jsonify(list_candidates_json(book, href))
+
+
+@app.route("/api/books/<int:book_id>/list/model/<int:chapter_id>")
+def list_model_route(book_id, chapter_id):
+    book = get_book(book_id)
+    href = chapter_href(book_id, chapter_id)
+    try:
+        return jsonify(list_model_json(book, href, request.args.get("path", "")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/api/books/<int:book_id>/list/create", methods=["POST"])
+def list_create(book_id):
+    """框选连续节点组合为 ul/ol。拒绝跨章/交叉嵌套/可能丢字的提交。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    href = chapter_href(book_id, d["chapter_id"])
+    try:
+        inverse, new_path, summary = create_list(
+            book, href, d.get("paths") or [],
+            list_type=d.get("type", "ul"), start=d.get("start"),
+            strip_markers=bool(d.get("strip_markers", True)),
+            blocks=d.get("blocks") or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    db.add_change(book_id, "list", "组合列表 %s @%s（%s）"
+                  % (new_path, href, "；".join(summary)), inverse)
+    rescan_chapter(book, href)
+    run_checks(book, LIST_AFFECTED, href)
+    book.save()
+    m = list_model_json(book, href, new_path)
+    return jsonify({"ok": True, "model": m, "new_path": new_path,
+                    "before_pretty": pretty_snapshot(inverse["before_html"]),
+                    "after_pretty": pretty_region(
+                        [find_by_path(book.soup(href), p)
+                         for p in inverse["after_paths"]]),
+                    "nodes": db.list_nodes(book_id, d["chapter_id"]),
+                    "html_lang": chapter_html_lang(book, href),
+                    "state": state(book_id)})
+
+
+@app.route("/api/books/<int:book_id>/list/op", methods=["POST"])
+def list_op(book_id):
+    """单个列表操作：缩进/提升、纳邻/缩界、拆开/接续、起始序号/value、归整/删空。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    href = chapter_href(book_id, d["chapter_id"])
+    try:
+        inverse, new_path, summary = apply_op(
+            book, href, d["path"], d["op"], d.get("params") or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    db.add_change(book_id, "list",
+                  "列表%s %s @%s（%s）"
+                  % (d["op"], d["path"], href, "；".join(summary)), inverse)
+    rescan_chapter(book, href)
+    run_checks(book, LIST_AFFECTED, href)
+    book.save()
+    payload = {"ok": True, "new_path": new_path,
+               "before_pretty": pretty_snapshot(inverse["before_html"]),
+               "after_pretty": pretty_region(
+                   [find_by_path(book.soup(href), p)
+                    for p in inverse["after_paths"]]),
+               "nodes": db.list_nodes(book_id, d["chapter_id"]),
+               "html_lang": chapter_html_lang(book, href),
+               "state": state(book_id)}
+    if new_path:
+        payload["model"] = list_model_json(book, href, new_path)
+    return jsonify(payload)
+
+
+def pretty_snapshot(before_html):
+    from bs4 import BeautifulSoup as BS
+    return pretty_region([next(c for c in BS(h, "xml").contents if c.name)
+                          for h in before_html])
+
+
 @app.route("/api/books/<int:book_id>/undo", methods=["POST"])
 def undo(book_id):
     change = db.last_active_change(book_id)
@@ -356,6 +448,11 @@ def undo(book_id):
         restore_table(book, inv["chapter"], inv["path"], inv["old_html"])
         rescan_chapter(book, inv["chapter"])
         recheck_table(book, inv["chapter"], inv["path"])
+    elif kind == "list":
+        restore_region(book, inv["chapter"], inv["parent_path"], inv["index0"],
+                       inv["after_paths"], inv["before_html"])
+        rescan_chapter(book, inv["chapter"])
+        run_checks(book, inv["affected"], inv["chapter"])
     db.mark_change_undone(change["id"])
     book.save()
     return jsonify({"ok": True, "undone": change["summary"],
@@ -447,7 +544,7 @@ def export_changes(book_id):
     w = csv.writer(buf)
     w.writerow(["时间", "类型", "说明", "已撤销"])
     kind_label = {"updates": "属性修改", "move": "节点移动", "spine": "章节排序",
-                  "table": "表格校修"}
+                  "table": "表格校修", "list": "列表校修"}
     for ch in reversed(db.list_changes(book_id, limit=10000)):
         w.writerow([ch["ts"], kind_label.get(ch["kind"], ch["kind"]),
                     ch["summary"], "是" if ch["undone"] else "否"])

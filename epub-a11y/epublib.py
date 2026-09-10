@@ -27,6 +27,7 @@ CHECK_LABELS = {
     "broken_anchor": "失效锚点",
     "footnote_backlink": "脚注回链缺失",
     "table_a11y": "表格表头与关联",
+    "list_a11y": "列表语义与结构",
 }
 
 
@@ -853,6 +854,15 @@ CHECKS = {
     "table_a11y":         {"scope": "chapter", "fn": ch_table_a11y},
 }
 
+# 列表语义检查在 listlib 中实现（检查端与编辑工作区共用同一组发现），
+# 因依赖顺序延后注册。
+def _register_list_check():
+    import listlib
+    CHECKS["list_a11y"] = {"scope": "chapter", "fn": listlib.ch_list_a11y}
+
+
+_register_list_check()
+
 # 编辑动作 → 受影响的检查（只重跑这些）
 AFFECTED_BY_ATTR = {
     "alt":           ["img_alt"],
@@ -860,7 +870,8 @@ AFFECTED_BY_ATTR = {
     "heading_level": ["heading_hierarchy", "toc"],
     "epub_type":     ["footnote_backlink", "toc"],
 }
-AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "footnote_backlink", "table_a11y"]
+AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "footnote_backlink", "table_a11y",
+                    "list_a11y"]
 AFFECTED_BY_SPINE = ["toc"]
 
 
