@@ -60,6 +60,7 @@ async function openBook(id) {
   S.nodes = {}; S.htmlLang = {}; S.candidates = {};
   $("#tableModal").classList.remove("open");
   $("#listModal").classList.remove("open");
+  $("#noteModal").classList.remove("open");
   await Promise.all(S.chapters.map(async (c) => {
     const d = await api(`/api/books/${id}/chapters/${c.id}/nodes`);
     S.nodes[c.id] = d.nodes; S.htmlLang[c.id] = d.html_lang;
@@ -395,6 +396,8 @@ function renderIssues() {
         openTableWorkspace(ch.id, el.dataset.path);  // 表格问题 → 打开表格工作区
       else if (el.dataset.check === "list_a11y")
         openListIssue(ch.id, el.dataset.path);       // 列表问题 → 打开列表工作区
+      else if (el.dataset.check === "note_a11y")
+        openNoteWorkspace(null);                    // 注释问题 → 打开注释关系图
       else if (el.dataset.path) selectNode(ch.id, el.dataset.path);
       else selectChapter(ch.id);
     };
@@ -481,6 +484,7 @@ $("#btnUndo").onclick = async () => {
 $("#btnExportEpub").onclick = () => S.bookId && (location.href = `/api/books/${S.bookId}/export/epub`);
 $("#btnExportChanges").onclick = () => S.bookId && (location.href = `/api/books/${S.bookId}/export/changes`);
 $("#btnExportReport").onclick = () => S.bookId && (location.href = `/api/books/${S.bookId}/export/report`);
+$("#btnNoteGraph").onclick = () => S.bookId && openNoteWorkspace(null);
 
 /* ---------------- 标签页 ---------------- */
 document.querySelectorAll(".tab").forEach((t) => {

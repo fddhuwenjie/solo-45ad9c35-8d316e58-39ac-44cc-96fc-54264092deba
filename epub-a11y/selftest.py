@@ -200,11 +200,240 @@ def run_node_list_tests():
         FAIL.append("列表前端回归(list_test.js)")
 
 
+def run_node_note_tests():
+    """运行注释关系图前端逻辑回归（static/note_test.js，node 不可用时跳过）。"""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        print("SKIP   node 不可用，跳过注释关系图前端回归")
+        return
+    js = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "static", "note_test.js")
+    p = subprocess.run([node, js], capture_output=True, text=True)
+    print(p.stdout.strip())
+    if p.stderr.strip():
+        print(p.stderr.strip())
+    if p.returncode != 0:
+        FAIL.append("注释关系图前端回归(note_test.js)")
+
+
+def run_note_graph_tests(c, bid):
+    """注释关系图工作区端到端（检查端与工作区共用 notelib.build_graph）。"""
+    import notelib
+
+    st = c.get(f"/api/books/{bid}").get_json()
+    ni = [i for i in st["issues"] if i["check_name"] == "note_a11y"]
+    check("注释:问题总数>=15", len(ni) >= 15, len(ni))
+    for needle in ("未声明的引用", "未声明的注释", "一号多注", "孤立尾注",
+                   "嵌套", "回程链接", "跨章错指", "跨书目", "普通列表项",
+                   "一号多引"):
+        check("注释:检出「%s」" % needle, any(needle in i["message"] for i in ni),
+              [i["message"][:40] for i in ni])
+
+    m = c.get(f"/api/books/{bid}/note/model").get_json()
+    check("注释:模型含两栏与连线",
+          len(m["refs"]) >= 8 and len(m["notes"]) >= 9 and len(m["edges"]) >= 5,
+          (len(m["refs"]), len(m["notes"]), len(m["edges"])))
+    check("注释:批量候选含 [6] 组",
+          any(x["note_type"] == "endnote" and x["start"] == 6
+              and x["end"] == 6 and x["applicable"] for x in m["batches"]),
+          m["batches"])
+    check("注释:阻止来源列出跨书目链接",
+          len(m["blocks"]["external"]) == 2, m["blocks"]["external"])
+    check("注释:试听顺序按 spine 排序且含回程提示",
+          [l["kind"] for l in m["sequence"]].count("ref") >= 8
+          and any("共用回链" in l["text"] for l in m["sequence"]))
+
+    def keys(**kw):
+        out = {}
+        for r in m["refs"]:
+            ok = all(r.get(k) == v for k, v in kw.items())
+            if ok:
+                out.setdefault(r.get("el_id") or r["tag"], r["key"])
+        return out
+
+    ch6 = "ch6.xhtml"
+    sup_key = next(r["key"] for r in m["refs"]
+                   if r["chapter"].endswith(ch6) and r["tag"] == "sup")
+    en6 = next(n["key"] for n in m["notes"] if n["el_id"] == "en6")
+    en3 = next(n["key"] for n in m["notes"] if n["el_id"] == "en3")
+    enr3b = next(r["key"] for r in m["refs"] if r["el_id"] == "enr3b")
+    en5b = next(n["key"] for n in m["notes"] if n["el_id"] == "en5b")
+
+    def ch6_html():
+        return c.get(f"/api/books/{bid}/preview/ch6.xhtml").get_data(as_text=True)
+
+    def ch1_html():
+        return c.get(f"/api/books/{bid}/preview/ch1.xhtml").get_data(as_text=True)
+
+    before6, before1 = ch6_html(), ch1_html()
+
+    # 预览不落盘：声明 en6 + sup 包裹连线 + 回程
+    edits = {
+        "marks": [{"key": en6, "kind": "endnote"}],
+        "links": [{"ref_key": sup_key, "note_key": en6}],
+        "backlinks": [{"ref_key": sup_key, "note_key": en6}],
+    }
+    r = c.post(f"/api/books/{bid}/note/preview", json={"edits": edits})
+    d = r.get_json()
+    check("注释:预览 200", r.status_code == 200, d.get("error"))
+    pm = d["model"]
+    p_ref = next(x for x in pm["refs"] if x["el_id"] and x["el_id"].startswith("ref-ch6"))
+    p_note = next(x for x in pm["notes"] if x["el_id"] == "en6")
+    check("注释:预览中 sup 被包裹为 noteref 锚点",
+          p_ref["tag"] == "a" and p_ref["declared"] and p_ref["target_key"] == en6)
+    check("注释:预览中回程链接建立",
+          any(b["ref_key"] == p_ref["key"] for b in p_note["backlinks"]))
+    check("注释:预览不产生未声明[6]问题",
+          not any("[6]" in i["message"] and "未声明" in i["message"]
+                  for i in pm["issues"]))
+    check("注释:预览不落盘",
+          xhtml_sem(ch6_html()) == xhtml_sem(before6))
+
+    # 删除仍被引用的注释：阻止并列出来源
+    r = c.post(f"/api/books/{bid}/note/save",
+               json={"edits": {"deletes": [{"key": en3}]}})
+    check("注释:删除仍被引用的注释被阻止并列出来源",
+          r.status_code == 400 and "仍被 2 处引用" in r.get_json()["error"]
+          and "[3]" in r.get_json()["error"],
+          r.get_json().get("error"))
+    check("注释:阻止提交不落地",
+          xhtml_sem(ch6_html()) == xhtml_sem(before6))
+
+    # 批量套用：服务端重算，标注/连线/回程一次完成
+    grp = next(x["id"] for x in m["batches"] if x["start"] == 6)
+    r = c.post(f"/api/books/{bid}/note/save",
+               json={"edits": {"batch_group": grp}})
+    d = r.get_json()
+    check("注释:批量套用成功", r.status_code == 200 and d["ok"], d.get("error"))
+    html = ch6_html()
+    check("注释:批量写入 epub:type+role+连线+回程",
+          'epub:type="endnote"' in html and 'role="doc-endnote"' in html
+          and 'role="doc-noteref"' in html and "note-backlink" in html
+          and "ref-ch6" in html)
+    left6 = [i for i in d["state"]["issues"]
+             if i["check_name"] == "note_a11y" and "[6]" in i["message"]]
+    check("注释:批量后未声明[6]问题消除", not left6, [i["message"] for i in left6])
+    check("注释:变更记录含注释关系校修",
+          any(x["kind"] == "note" for x in d["state"]["changes"]))
+    # 撤销：原 ID（en6 本就有 id）、原 sup 结构恢复
+    r = c.post(f"/api/books/{bid}/undo")
+    d = r.get_json()
+    check("注释:撤销批量成功", d["ok"])
+    check("注释:撤销恢复原 ID 与链接（sup 复原、en6 无 epub:type）",
+          xhtml_sem(ch6_html()) == xhtml_sem(before6))
+    check("注释:撤销后未声明[6]问题重现",
+          any("[6]" in i["message"] and "未声明" in i["message"]
+              for i in d["state"]["issues"]
+              if i["check_name"] == "note_a11y"))
+
+    # 为多次引用分别建立回程目标：en3 缺 enr3b 的回程
+    edits = {"backlinks": [{"ref_key": enr3b, "note_key": en3}]}
+    r = c.post(f"/api/books/{bid}/note/save", json={"edits": edits})
+    d = r.get_json()
+    check("注释:多次引用分别建立回程", r.status_code == 200 and d["ok"], d.get("error"))
+    html = ch6_html()
+    check("注释:写回指向 enr3b 的回程", 'href="#enr3b"' in html)
+    gone = not any("enr3b" in i["message"] and "回程链接" in i["message"]
+                   for i in d["state"]["issues"] if i["check_name"] == "note_a11y")
+    check("注释:enr3b 回链遗漏消除", gone)
+    c.post(f"/api/books/{bid}/undo")
+    check("注释:回程撤销后复原", xhtml_sem(ch6_html()) == xhtml_sem(before6))
+
+    # 跨书目连线被阻止（注号[2] 外部引用改连本书注释）
+    ext_ref = next(r["key"] for r in m["refs"]
+                   if r["chapter"].endswith("ch1.xhtml") and r["el_id"] == "ref-ext")
+    fn2 = next(n["key"] for n in m["notes"] if n["el_id"] == "fn2")
+    r = c.post(f"/api/books/{bid}/note/save", json={"edits": {
+        "links": [{"ref_key": ext_ref, "note_key": fn2, "href": "https://x.example/y"}],
+        "backlinks": [{"ref_key": ext_ref, "note_key": fn2}]}})
+    check("注释:跨书目连线被阻止",
+          r.status_code == 400 and "跨书目" in r.get_json()["error"],
+          r.get_json().get("error"))
+    check("注释:跨书目阻止不落地", xhtml_sem(ch1_html()) == xhtml_sem(before1))
+
+    # 外部声明型 noteref 指向外部：允许保留（既有问题仍在报告中）
+    st2 = c.get(f"/api/books/{bid}").get_json()
+    check("注释:既有跨书目链接保留为问题",
+          any(i["check_name"] == "note_a11y" and "example.org" in i["message"]
+              for i in st2["issues"]))
+
+    # 删除无引用的嵌套注释（en-nested）允许；en-loop 的嵌套问题仍在
+    nested = next(n["key"] for n in m["notes"] if n["el_id"] == "en-nested")
+    r = c.post(f"/api/books/{bid}/note/save",
+               json={"edits": {"deletes": [{"key": nested}]}})
+    d = r.get_json()
+    check("注释:删除无引用嵌套注释成功", r.status_code == 200 and d["ok"], d.get("error"))
+    nest_after = [i for i in d["state"]["issues"]
+                  if i["check_name"] == "note_a11y" and "注释嵌套" in i["message"]]
+    check("注释:被删嵌套注释问题消失（环路注释 en-loop 的嵌套仍在）",
+          len(nest_after) == 1, [i["message"] for i in nest_after])
+    c.post(f"/api/books/{bid}/undo")
+    st2 = c.get(f"/api/books/{bid}").get_json()
+    check("注释:撤销删除后两个嵌套问题重现",
+          len([i for i in st2["issues"]
+               if i["check_name"] == "note_a11y" and "注释嵌套" in i["message"]]) == 2)
+
+    # 环路：样例 ch6 本身含自指注释引用（en-loop），未声明[6]修复不得受其阻断；
+    # 同时直接用库层验证“本次提交新形成环路”被守恒校验阻止并整体回滚。
+    from app import BOOKS
+    import notelib as _nl
+    book = BOOKS.get(bid)
+    if book is not None:
+        before_ch3 = c.get(f"/api/books/{bid}/preview/ch3.xhtml").get_data(as_text=True)
+        snap = _nl.take_snapshot(book)
+        before_g = _nl.build_graph(book)
+        try:
+            fn1 = book.soup("ch3.xhtml").find(id="fn1")
+            a = book.soup("ch3.xhtml").new_tag(
+                "a", **{"epub:type": "noteref", "href": "#fn1"})
+            a.string = "[1]"
+            fn1.find("p").append(a)
+            try:
+                _nl._guard_graph(book, before_g)
+                raised = False
+            except ValueError:
+                raised = True
+            check("注释:本次提交新形成环路被阻止", raised)
+        finally:
+            _nl.restore_note_commit(book, snap)
+        check("注释:环路回滚后 ch3 复原",
+              xhtml_sem(c.get(f"/api/books/{bid}/preview/ch3.xhtml")
+                        .get_data(as_text=True)) == xhtml_sem(before_ch3))
+
+    # EPUB / 变更明细 / 问题报告同源
+    r = c.get(f"/api/books/{bid}/export/report")
+    check("注释:问题报告含关系图分类与各项",
+          "注释关系图" in r.get_data(as_text=True)
+          and "跨章错指" in r.get_data(as_text=True))
+    r = c.get(f"/api/books/{bid}/export/changes")
+    check("注释:变更明细 CSV 含注释关系校修",
+          "注释关系校修".encode("utf-8-sig") in r.data
+          or "注释关系校修".encode("utf-8") in r.data)
+    r = c.get(f"/api/books/{bid}/export/epub")
+    check("注释:EPUB 导出成功", r.status_code == 200 and r.data[:2] == b"PK")
+    with zipfile.ZipFile(io.BytesIO(r.data)) as z:
+        ch6_bytes = z.read("ch6.xhtml")
+    check("注释:导出包 ch6 含尾注区",
+          b'epub:type="endnotes"' in ch6_bytes
+          and b'epub:type="endnote"' in ch6_bytes)
+    r2 = c.post("/api/import", data={"file": (io.BytesIO(r.data), "fx.epub")},
+                content_type="multipart/form-data")
+    check("注释:导出 EPUB 可重新导入", r2.status_code == 200,
+          r2.get_json().get("error"))
+    st3 = r2.get_json()["state"]
+    n_after = [i for i in st3["issues"] if i["check_name"] == "note_a11y"]
+    check("注释:重开后关系图问题数一致", len(n_after) == len(ni),
+          (len(n_after), len(ni)))
+
+
 def main():
     db.init_db()
     c = app.test_client()
 
     run_node_list_tests()
+    run_node_note_tests()
 
     # 1. 载入样例书
     r = c.post("/api/load_sample")
@@ -212,7 +441,7 @@ def main():
     bid = r.get_json()["book_id"]
     st = r.get_json()["state"]
     check("载入样例书", bid >= 1)
-    check("章节数=5", len(st["chapters"]) == 5)
+    check("章节数=6", len(st["chapters"]) == 6, len(st["chapters"]))
 
     issues = st["issues"]
     by = {}
@@ -226,7 +455,11 @@ def main():
     check("检查:语言标记缺失", len(by.get("lang", [])) == 1)
     check("检查:重复 ID", len(by.get("duplicate_id", [])) == 1)
     check("检查:失效锚点", len(by.get("broken_anchor", [])) == 1)
-    check("检查:脚注回链缺失(跨章)", len(by.get("footnote_backlink", [])) == 1)
+    note_iss = by.get("note_a11y", [])
+    check("检查:注释关系图检出跨章错指/回链遗漏等", len(note_iss) >= 10, len(note_iss))
+    check("检查:跨章脚注错指",
+          any("跨章错指" in i["message"] for i in note_iss))
+    check("检查:回链遗漏", any("回程链接" in i["message"] for i in note_iss))
 
     ch1 = [x for x in st["chapters"] if "ch1" in x["href"]][0]
     ch2 = [x for x in st["chapters"] if "ch2" in x["href"]][0]
@@ -309,16 +542,20 @@ def main():
     ai = [n["order_index"] for n in d["nodes"] if n["tag"] == "aside"][0]
     hi = [n["order_index"] for n in d["nodes"] if n["tag"] == "h2"][0]
     check("侧栏已位于 h2 之后", ai > hi, f"aside={ai} h2={hi}")
-    check("移动重跑了 toc/heading/footnote/table/list 检查",
-          set(d["checks_ran"]) == {"heading_hierarchy", "toc", "footnote_backlink",
+    check("移动重跑了 toc/heading/note/table/list 检查",
+          set(d["checks_ran"]) == {"heading_hierarchy", "toc", "note_a11y",
                                    "table_a11y", "list_a11y"})
 
     # 8. 章节排序：使 spine 与目录一致，然后撤销
     ch5 = [x for x in st["chapters"] if "ch5" in x["href"]]
     ch5 = ch5[0] if ch5 else None
+    ch6 = [x for x in st["chapters"] if "ch6" in x["href"]]
+    ch6 = ch6[0] if ch6 else None
     order = [ch1["id"], ch3["id"], ch2["id"], ch4["id"]]
     if ch5:
         order.append(ch5["id"])
+    if ch6:
+        order.append(ch6["id"])
     r = c.post(f"/api/books/{bid}/spine/reorder", json={"order": order})
     d = r.get_json()
     check("spine 重排", d["ok"])
@@ -467,7 +704,7 @@ def main():
                 content_type="multipart/form-data")
     check("修正版 EPUB 可重新打开", r2.status_code == 200, r2.get_json().get("error"))
     st2 = r2.get_json()["state"]
-    check("重开书籍章节数=5", len(st2["chapters"]) == 5)
+    check("重开书籍章节数=6", len(st2["chapters"]) == 6, len(st2["chapters"]))
     check("重开后表格修复仍生效（表格问题为零）",
           not any(i["check_name"] == "table_a11y" for i in st2["issues"]))
     check("重开后 h3 修复仍生效",
@@ -766,6 +1003,10 @@ def main():
             html_back = ch5_html()
             check("撤销接续后被并入标题作为兄弟复原",
                   'id="ch5cut"' in html_back and ch5_unchanged())
+
+    # 16. 注释关系图：扫描、两栏模型、声明/连线/回程、批量、阻止来源、
+    #     预览不落盘、提交快照与撤销（恢复原 ID 与链接）、导出/报告同源
+    run_note_graph_tests(c, bid)
 
     print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
     if FAIL:

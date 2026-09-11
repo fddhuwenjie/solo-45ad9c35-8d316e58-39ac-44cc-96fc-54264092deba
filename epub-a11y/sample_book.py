@@ -8,12 +8,16 @@
 - 第二章 <html> 缺少 lang
 - 第二章重复 id="dup"
 - 第二章失效锚点 #nowhere
-- 跨章脚注：第一章 noteref → 第三章 fn1，fn1 缺少回链；fn2 有回链作对照
+- 跨章脚注错指：第一章 ref1、第二章 ref2 → 第三章 fn1/fn2（目标章设有脚注区），
+  fn1 缺回链；另有一个引用指向 EPUB 之外的跨书目链接
 - 错序侧栏：第一章 aside.sidebar 位于其所属小节标题之前，第三章侧栏在引言段之前
 - 第四章复杂表格：表A 缺 caption、首行视觉表头仍为 td、headers 引用失效、数据格无法关联表头；
   表B scope 与合并结构冲突、headers 引用循环；表C 为规范用法对照（无问题）
 - 第五章列表语义：连续编号段落伪装成有序列表、单段 <br> 拼行、孤立 li、
   空列表、ol start/可见编号不符、非法直接嵌套、相邻 ol 被标题与图片截断
+- 第六章尾注关系图：一号多引且回链只回第一处、未声明引用（[6] 无连线）、
+  孤立尾注、一号多注（两个 5 号尾注）、尾注区混入普通列表项、嵌套注释、
+  未声明注释（缺 epub:type）、跨书目链接与跨章脚注错指
 """
 import base64
 import os
@@ -31,7 +35,8 @@ CH1 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第一章 引言') + """
 <body>
 <section epub:type="chapter" id="s1">
 <h1 id="ch1">第一章 引言</h1>
-<p>欢迎来到本书。本章介绍背景知识，并包含一个跨章脚注<a epub:type="noteref" id="ref1" href="ch3.xhtml#fn1">[1]</a>。</p>
+<p>欢迎来到本书。本章介绍背景知识，并包含一个跨章错指的脚注<a epub:type="noteref" id="ref1" href="ch3.xhtml#fn1">[1]</a>。</p>
+<p>另有一处引用指向了 EPUB 之外的资料<a epub:type="noteref" id="ref-ext" href="https://example.org/paper">[2]</a>。</p>
 <aside epub:type="sidebar" id="sb1" class="sidebar"><p>侧栏：本侧栏在 DOM 中位置错误，应位于「背景」小节之后，请拖拽调整。</p></aside>
 <h2 id="ch1s1">背景</h2>
 <p>这里有一张缺少替代文本的照片：</p>
@@ -49,7 +54,7 @@ CH2 = XHTML_HEAD % ('', '第二章 方法') + """
 <p>本节标题直接从一级跳到了三级。</p>
 <p id="dup">第一段。</p>
 <p id="dup">这是重复 ID 的段落。</p>
-<p>参见<a href="#nowhere">不存在的锚点</a>，以及正常的脚注<a epub:type="noteref" id="ref2" href="ch3.xhtml#fn2">[2]</a>。</p>
+<p>参见<a href="#nowhere">不存在的锚点</a>，以及同样跨章错指的脚注<a epub:type="noteref" id="ref2" href="ch3.xhtml#fn2">[2]</a>。</p>
 <p>Bonjour, ceci est une phrase francaise.</p>
 </section>
 </body></html>"""
@@ -61,8 +66,8 @@ CH3 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第三章 结果') + """
 <aside epub:type="sidebar" id="sb2" class="sidebar"><p>错序侧栏：应出现在下方引言段之后。</p></aside>
 <p>本章展示实验结果，脚注集中于文末。</p>
 <section epub:type="footnotes">
-<aside epub:type="footnote" id="fn1"><p>1. 这是来自第一章的跨章脚注（缺少返回正文的回链）。</p></aside>
-<aside epub:type="footnote" id="fn2"><p>2. 第二章的脚注。<a href="ch2.xhtml#ref2">↩ 返回正文</a></p></aside>
+<aside epub:type="footnote" id="fn1"><p>1. 这是被第一章跨章错指的脚注（且缺少返回正文的回链）。</p></aside>
+<aside epub:type="footnote" id="fn2"><p>2. 第二章跨章错指的脚注。<a href="ch2.xhtml#ref2">↩ 返回正文</a></p></aside>
 </section>
 </section>
 </body></html>"""
@@ -143,6 +148,34 @@ CH5 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第五章 列表') + """
 </section>
 </body></html>"""
 
+CH6 = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '第六章 尾注') + """
+<body>
+<section epub:type="chapter" id="s6">
+<h1 id="ch6">第六章 尾注</h1>
+<p>同一尾注在正文中被引用两次：第一次<a epub:type="noteref" id="enr3a" href="ch6.xhtml#en3">[3]</a>，
+稍后第二次引用<a epub:type="noteref" id="enr3b" href="ch6.xhtml#en3">[3]</a>，
+而该尾注只有一条回程链接，只能把读者送回第一处。</p>
+<p>这里有一个未声明的引用：<sup>[6]</sup>，它没有 noteref 语义也没有连线。</p>
+<p>一个引用指向 EPUB 之外：<a epub:type="noteref" id="enr7" href="https://example.org/study">[7]</a>。</p>
+<p>另有一个跨章脚注错指：<a epub:type="noteref" id="enr1" href="ch3.xhtml#fn1">[1]</a>。</p>
+
+<section epub:type="endnotes" id="endnotes">
+<h2>尾注</h2>
+<ol>
+<li epub:type="endnote" id="en3"><p>3. 两次引用共用的尾注。<a href="#enr3a">↩ 返回引用处</a></p></li>
+<li epub:type="endnote" id="en4"><p>4. 孤立尾注：正文没有任何引用指向这里。</p></li>
+<li epub:type="endnote" id="en5a"><p>5. 第一个五号尾注。</p></li>
+<li epub:type="endnote" id="en5b"><p>5. 第二个五号尾注（一号多注）。
+  <aside epub:type="endnote" id="en-nested"><p>[8] 嵌套在尾注里的注释。</p></aside>
+  <aside epub:type="endnote" id="en-loop"><p>[9] 含引用环路的嵌套注释，内部的注释引用又指回自身
+    <a epub:type="noteref" id="enr-loop" href="#en-loop">[9]</a>。</p></aside></p></li>
+<li><p>出版方信息（这是混入尾注区的普通列表项，没有注号）。</p></li>
+</ol>
+<aside id="en6"><p>[6] 未声明的注释：有可见注号，却缺少 epub:type/role 语义。</p></aside>
+</section>
+</section>
+</body></html>"""
+
 NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <body>
 <nav epub:type="toc" id="toc">
@@ -153,6 +186,7 @@ NAV = XHTML_HEAD % (' lang="zh-CN" xml:lang="zh-CN"', '目录') + """
 <li><a href="ch2.xhtml">第二章 方法</a></li>
 <li><a href="ch4.xhtml">第四章 数据表格</a></li>
 <li><a href="ch5.xhtml">第五章 列表</a></li>
+<li><a href="ch6.xhtml">第六章 尾注</a></li>
 </ol>
 </nav>
 <nav epub:type="landmarks" id="landmarks">
@@ -178,11 +212,12 @@ OPF = """<?xml version="1.0" encoding="utf-8"?>
 <item id="ch3" href="ch3.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch4" href="ch4.xhtml" media-type="application/xhtml+xml"/>
 <item id="ch5" href="ch5.xhtml" media-type="application/xhtml+xml"/>
+<item id="ch6" href="ch6.xhtml" media-type="application/xhtml+xml"/>
 <item id="css" href="css/style.css" media-type="text/css"/>
 <item id="img1" href="images/photo.png" media-type="image/png"/>
 <item id="img2" href="images/deco.png" media-type="image/png"/>
 </manifest>
-<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/><itemref idref="ch4"/><itemref idref="ch5"/></spine>
+<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="ch3"/><itemref idref="ch4"/><itemref idref="ch5"/><itemref idref="ch6"/></spine>
 </package>"""
 
 CONTAINER = """<?xml version="1.0" encoding="utf-8"?>
@@ -209,6 +244,7 @@ def create_sample(path):
             ("ch3.xhtml", CH3),
             ("ch4.xhtml", CH4),
             ("ch5.xhtml", CH5),
+            ("ch6.xhtml", CH6),
             ("css/style.css", CSS),
         ]:
             z.writestr(name, data.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)

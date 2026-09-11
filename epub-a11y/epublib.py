@@ -25,7 +25,7 @@ CHECK_LABELS = {
     "lang": "语言标记缺失",
     "duplicate_id": "重复 ID",
     "broken_anchor": "失效锚点",
-    "footnote_backlink": "脚注回链缺失",
+    "note_a11y": "注释关系图",
     "table_a11y": "表格表头与关联",
     "list_a11y": "列表语义与结构",
 }
@@ -295,44 +295,6 @@ def ch_broken_anchor(book, href):
             if not book.soup(target).find(id=frag):
                 out.append(_issue(href, dom_path(a), "broken_anchor", "error",
                                   "失效锚点 #%s（链接 %s）" % (frag, h)))
-    return out
-
-
-def ch_footnote_backlink(book):
-    """noteref 指向的脚注必须含有回到该 noteref 的回链（支持跨章）。全书级检查。"""
-    out = []
-    for href in book.spine:
-        if href not in book.raw:
-            continue
-        for a in book.soup(href).find_all("a", attrs={"epub:type": "noteref"}):
-            refid = a.get("id")
-            if not refid or not a.get("href"):
-                continue
-            h = a["href"]
-            file, frag = (h.split("#", 1) + [""])[:2] if "#" in h else (h, "")
-            target = book.resolve(href, file) if file else href
-            if target not in book.raw:
-                continue
-            note = book.soup(target).find(id=frag)
-            if note is None:
-                continue  # 由 broken_anchor 报告
-            container = note if note.name in ("aside", "li", "section", "div") \
-                else (note.find_parent(["aside", "li", "section", "div"]) or note)
-            ok = False
-            for link in container.find_all("a", href=True):
-                lh = link["href"]
-                if "#" not in lh:
-                    continue
-                lf, lfrag = lh.split("#", 1)
-                lt = book.resolve(target, lf) if lf else target
-                if lt == href and lfrag == refid:
-                    ok = True
-                    break
-            if not ok:
-                out.append(_issue(target, dom_path(note), "footnote_backlink",
-                                  "warning",
-                                  "脚注 #%s 缺少返回正文（%s#%s）的回链"
-                                  % (frag, os.path.basename(href), refid)))
     return out
 
 
@@ -849,22 +811,22 @@ CHECKS = {
     "lang":               {"scope": "chapter", "fn": ch_lang},
     "duplicate_id":       {"scope": "chapter", "fn": ch_duplicate_id},
     "broken_anchor":      {"scope": "chapter", "fn": ch_broken_anchor},
-    "footnote_backlink":  {"scope": "book",    "fn": ch_footnote_backlink},
     "toc":                {"scope": "book",    "fn": ch_toc},
     "table_a11y":         {"scope": "chapter", "fn": ch_table_a11y},
 }
-# list_a11y 检查由 listlib 提供，在 app 模块导入时注册（避免循环导入）。
+# list_a11y 检查由 listlib 提供、note_a11y 由 notelib 提供，
+# 在 app 模块导入时注册（避免循环导入）。
 
 # 编辑动作 → 受影响的检查（只重跑这些）
 AFFECTED_BY_ATTR = {
     "alt":           ["img_alt"],
     "lang":          ["lang"],
     "heading_level": ["heading_hierarchy", "toc"],
-    "epub_type":     ["footnote_backlink", "toc"],
+    "epub_type":     ["note_a11y", "toc"],
 }
-AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "footnote_backlink", "table_a11y",
+AFFECTED_BY_MOVE = ["heading_hierarchy", "toc", "note_a11y", "table_a11y",
                     "list_a11y"]
-AFFECTED_BY_SPINE = ["toc"]
+AFFECTED_BY_SPINE = ["toc", "note_a11y"]
 
 
 # ---------------- 编辑操作（返回逆操作所需信息） ----------------

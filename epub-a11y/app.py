@@ -16,6 +16,7 @@ from flask import (Flask, jsonify, render_template, request, send_file,
 import db
 import epublib
 import listlib
+import notelib
 from epublib import Book, CHECK_LABELS, CHECKS, AFFECTED_BY_ATTR, \
     AFFECTED_BY_MOVE, AFFECTED_BY_SPINE, apply_updates, move_node, undo_move, \
     reorder_spine, rebuild_landmarks_nav, find_by_path, dom_path, \
@@ -24,10 +25,14 @@ from epublib import Book, CHECK_LABELS, CHECKS, AFFECTED_BY_ATTR, \
 from listlib import (candidates_json as list_candidates_json,
                      list_model_json, create_list, apply_op,
                      restore_region, pretty_region)
+from notelib import (note_model_json, ch_note_a11y, commit_note_edits,
+                     preview_note_edits, take_snapshot, restore_note_commit,
+                     NOTE_CHECK)
 from sample_book import create_sample
 
-# 列表语义检查（检查端与列表工作区共用 listlib 的同一组发现）
+# 列表/注释语义检查（检查端与工作区共用同一组发现）
 CHECKS["list_a11y"] = {"scope": "chapter", "fn": listlib.ch_list_a11y}
+CHECKS[NOTE_CHECK] = {"scope": "book", "fn": ch_note_a11y}
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(BASE, "data")
@@ -423,6 +428,59 @@ def pretty_snapshot(before_html):
                           for h in before_html])
 
 
+# ---------------- 注释关系图工作区 ----------------
+@app.route("/api/books/<int:book_id>/note/model")
+def note_model(book_id):
+    """全书注释关系图：引用栏 / 注释栏 / 连线 / 问题 / 批量候选 / 试听顺序。"""
+    book = get_book(book_id)
+    return jsonify(note_model_json(book))
+
+
+@app.route("/api/books/<int:book_id>/note/preview", methods=["POST"])
+def note_preview(book_id):
+    """把暂存编辑应用到内存文档树、重算关系图后整体回滚，不落盘。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    try:
+        model = preview_note_edits(book, d.get("edits") or {})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"model": model})
+
+
+@app.route("/api/books/<int:book_id>/note/save", methods=["POST"])
+def note_save(book_id):
+    """应用一批注释关系编辑：提交前快照受影响文档（可撤销、恢复原 ID 与链接）、
+    守恒校验（环路/跨书目/删除仍被引用一律阻止并列出来源）、重跑注释检查。"""
+    d = request.get_json(force=True)
+    book = get_book(book_id)
+    edits = d.get("edits") or {}
+    if not any(edits.get(k) for k in
+               ("marks", "unmarks", "links", "unlinks", "backlinks",
+                "deletes", "batch_group")):
+        return jsonify({"error": "没有改动"}), 400
+    snapshots = take_snapshot(book)
+    try:
+        summary, affected = commit_note_edits(book, edits)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    db.add_change(
+        book_id, "note",
+        "注释关系校修（%s）%s"
+        % ("、".join(sorted(os.path.basename(h) for h in affected)),
+           "；".join(summary)),
+        {"kind": "note", "snapshots": snapshots,
+         "affected": [NOTE_CHECK, "broken_anchor", "duplicate_id"]})
+    for href in affected:
+        rescan_chapter(book, href)
+    run_checks(book, [NOTE_CHECK])
+    run_checks(book, ["broken_anchor", "duplicate_id"])
+    book.save()
+    return jsonify({"ok": True, "summary": summary,
+                    "model": note_model_json(book),
+                    "state": state(book_id)})
+
+
 @app.route("/api/books/<int:book_id>/undo", methods=["POST"])
 def undo(book_id):
     change = db.last_active_change(book_id)
@@ -456,6 +514,11 @@ def undo(book_id):
                        inv["after_paths"], inv["before_html"])
         rescan_chapter(book, inv["chapter"])
         run_checks(book, inv["affected"], inv["chapter"])
+    elif kind == "note":
+        restore_note_commit(book, inv["snapshots"])
+        for href in inv["snapshots"]:
+            rescan_chapter(book, href)
+        run_checks(book, inv["affected"])
     db.mark_change_undone(change["id"])
     book.save()
     return jsonify({"ok": True, "undone": change["summary"],
@@ -610,7 +673,7 @@ def export_changes(book_id):
     w = csv.writer(buf)
     w.writerow(["时间", "类型", "说明", "已撤销"])
     kind_label = {"updates": "属性修改", "move": "节点移动", "spine": "章节排序",
-                  "table": "表格校修", "list": "列表校修"}
+                  "table": "表格校修", "list": "列表校修", "note": "注释关系校修"}
     for ch in reversed(db.list_changes(book_id, limit=10000)):
         w.writerow([ch["ts"], kind_label.get(ch["kind"], ch["kind"]),
                     ch["summary"], "是" if ch["undone"] else "否"])

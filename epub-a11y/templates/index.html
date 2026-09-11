@@ -12,6 +12,7 @@
   <button id="btnImport">导入 EPUB</button>
   <input type="file" id="fileInput" accept=".epub" hidden>
   <button id="btnSample">载入样例书</button>
+  <button id="btnNoteGraph" title="打开注释关系图（引用 ↔ 脚注/尾注）">🔗 注释关系图</button>
   <span class="sep"></span>
   <button id="btnUndo" title="撤销最近一次修改">↩ 撤销</button>
   <span class="sep"></span>
@@ -136,8 +137,51 @@
   </div>
 </div>
 
+<!-- 注释关系图工作区 -->
+<div id="noteModal" class="modal">
+  <div class="modal-box nt-box">
+    <div class="modal-head">
+      <h3>注释关系图</h3>
+      <code id="ntPath" class="hint">正文引用 ⇄ 脚注/尾注（点击任一端在预览中定位）</code>
+      <span class="sep"></span>
+      <button id="ntReset">放弃暂存</button>
+      <button id="ntSave" class="primary">提交修改</button>
+      <button id="ntClose">✕ 关闭</button>
+    </div>
+    <div class="nt-toolbar">
+      <span class="hint">连线＝引用可达注释；红色＝跨书目。多次引用需分别建立回程目标。</span>
+    </div>
+    <div class="nt-body">
+      <div id="ntGraph" class="nt-graph">
+        <svg id="ntLines"></svg>
+        <div id="ntBody" class="nt-columns">
+          <div>
+            <div class="nt-colhead">正文引用 noteref</div>
+            <div id="ntRefs" class="nt-col"></div>
+          </div>
+          <div>
+            <div class="nt-colhead">脚注 / 尾注</div>
+            <div id="ntNotes" class="nt-col"></div>
+          </div>
+        </div>
+      </div>
+      <div id="ntSide">
+        <div class="nt-sec" id="ntDetail"></div>
+        <div class="nt-sec">
+          <b>试听顺序</b>
+          <button id="ntPlay" class="mini">▶ 试听顺序</button>
+          <div id="ntSequence" class="nt-sequence"></div>
+        </div>
+        <div class="nt-sec" id="ntBatches"></div>
+        <div class="nt-sec" id="ntIssues"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 <script src="/static/table.js"></script>
 <script src="/static/list.js"></script>
+<script src="/static/note.js"></script>
 </body>
 </html>

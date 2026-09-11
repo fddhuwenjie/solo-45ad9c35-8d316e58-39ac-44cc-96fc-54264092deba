@@ -151,6 +151,20 @@ def _li_value(li):
 
 
 # ---------------- 结构分析（检查与候选共用） ----------------
+def _in_notes_region(el):
+    """元素是否位于脚注/尾注容器内（epub:type 词元或 ARIA role）。"""
+    p = el
+    while p is not None and getattr(p, "name", None):
+        toks = set((p.get("epub:type") or "").split())
+        if toks & {"footnote", "endnote", "footnotes", "endnotes"}:
+            return True
+        if (p.get("role") or "").strip().lower() in (
+                "doc-footnote", "doc-endnote"):
+            return True
+        p = p.parent
+    return False
+
+
 def _finding(href, path, severity, message, candidate=None):
     f = {"chapter": href, "path": path, "check": "list_a11y",
          "severity": severity, "message": message}
@@ -341,6 +355,8 @@ def analyze_lists(book, href):
     for lst in soup.find_all(["ul", "ol"]):
         if lst.find_parent("nav") is not None or href == book.nav_path:
             continue
+        if _in_notes_region(lst):
+            continue  # 脚注/尾注区的编号列表属于注释关系图，不报列表问题
         findings.extend(_check_existing_list(href, lst))
 
     # 在每个块容器的直接子元素序列上识别候选段落 / 孤立 li。
@@ -349,6 +365,8 @@ def analyze_lists(book, href):
     for parent in parents:
         if parent.name in ("ul", "ol", "nav") or parent.find_parent("nav"):
             continue
+        if _in_notes_region(parent):
+            continue  # 注释区内的“1. …”行是注释条目而非列表候选
         kids = _direct(parent)
         i = 0
         while i < len(kids):
@@ -470,7 +488,8 @@ def candidates_json(book, href):
         cands.append(c)
     lists = []
     for lst in book.soup(href).find_all(["ul", "ol"]):
-        if lst.find_parent("nav") is None and href != book.nav_path:
+        if lst.find_parent("nav") is None and href != book.nav_path \
+                and not _in_notes_region(lst):
             lists.append(dom_path(lst))
     return {"candidates": cands, "lists": lists}
 
