@@ -222,6 +222,15 @@ def run_note_graph_tests(c, bid):
     """注释关系图工作区端到端（检查端与工作区共用 notelib.build_graph）。"""
     import notelib
 
+    # 相对回链路径：同章 #id、同目录跨章 a.xhtml#id、子目录注释回到上级 ../a.xhtml#id
+    check("注释:回链相对路径（同章/同目录/子目录）",
+          notelib._relative_href("text/ch3.xhtml", "text/ch3.xhtml", "r1")
+          == "#r1"
+          and notelib._relative_href("text/ch3.xhtml", "text/ch1.xhtml", "r1")
+          == "ch1.xhtml#r1"
+          and notelib._relative_href("notes/end.xhtml", "text/ch1.xhtml", "r1")
+          == "../text/ch1.xhtml#r1")
+
     st = c.get(f"/api/books/{bid}").get_json()
     ni = [i for i in st["issues"] if i["check_name"] == "note_a11y"]
     check("注释:问题总数>=15", len(ni) >= 15, len(ni))
@@ -301,12 +310,36 @@ def run_note_graph_tests(c, bid):
     check("注释:阻止提交不落地",
           xhtml_sem(ch6_html()) == xhtml_sem(before6))
 
-    # 批量套用：服务端重算，标注/连线/回程一次完成
+    # 批量套用：先 /note/preview 同组候选（不得改写实时内存 DOM），
+    # 再用同一 batch_group 直接 /note/save（实际改动章节必须 dirty 并写回 working.epub）
     grp = next(x["id"] for x in m["batches"] if x["start"] == 6)
+    r = c.post(f"/api/books/{bid}/note/preview",
+               json={"edits": {"batch_group": grp}})
+    d = r.get_json()
+    pv = d.get("model")
+    pv_ref = next((x for x in (pv or {}).get("refs", [])
+                   if x["number"] == 6 and x["chapter"].endswith("ch6.xhtml")),
+                  None)
+    pv_note = next((x for x in (pv or {}).get("notes", [])
+                    if x["el_id"] == "en6"), None)
+    check("注释:批量预览 200 且同组在预览模型中已连线",
+          r.status_code == 200 and pv is not None
+          and pv_ref is not None and pv_ref["target_key"] == pv_note["key"]
+          and any(b.get("ref_key") == pv_ref["key"]
+                  for b in (pv_note or {}).get("backlinks", [])),
+          d.get("error"))
+    check("注释:批量预览不落盘（实时模型仍为原始未连线关系）",
+          xhtml_sem(ch6_html()) == xhtml_sem(before6))
+    # 实时关系模型未被污染：同一 batch_group 仍可直接保存
+    m_live = c.get(f"/api/books/{bid}/note/model").get_json()
+    check("注释:预览后同组候选仍存在",
+          any(x["id"] == grp for x in m_live["batches"]))
+
     r = c.post(f"/api/books/{bid}/note/save",
                json={"edits": {"batch_group": grp}})
     d = r.get_json()
-    check("注释:批量套用成功", r.status_code == 200 and d["ok"], d.get("error"))
+    check("注释:预览后同组批量保存仍成功",
+          r.status_code == 200 and d["ok"], d.get("error"))
     html = ch6_html()
     check("注释:批量写入 epub:type+role+连线+回程",
           'epub:type="endnote"' in html and 'role="doc-endnote"' in html
@@ -317,6 +350,12 @@ def run_note_graph_tests(c, bid):
     check("注释:批量后未声明[6]问题消除", not left6, [i["message"] for i in left6])
     check("注释:变更记录含注释关系校修",
           any(x["kind"] == "note" for x in d["state"]["changes"]))
+    # working.epub 必须已写回（直接批量保存曾漏登记 batch 章节 → 丢失改动）
+    import db as _db
+    with zipfile.ZipFile(_db.get_book(bid)["path"]) as zf:
+        on_disk = zf.read("ch6.xhtml").decode("utf-8")
+    check("注释:直接批量保存写入 working.epub",
+          'role="doc-endnote"' in on_disk and "note-backlink" in on_disk)
     # 撤销：原 ID（en6 本就有 id）、原 sup 结构恢复
     r = c.post(f"/api/books/{bid}/undo")
     d = r.get_json()
@@ -340,6 +379,49 @@ def run_note_graph_tests(c, bid):
     check("注释:enr3b 回链遗漏消除", gone)
     c.post(f"/api/books/{bid}/undo")
     check("注释:回程撤销后复原", xhtml_sem(ch6_html()) == xhtml_sem(before6))
+
+    # 跨章回程目标：ref1（ch1 正文）→ fn1（ch3 脚注）。两章都必须纳入
+    # affected/dirty：引用章自动补 id，注释章写入跨章相对回链，缺一即丢改动。
+    ref1 = next(r["key"] for r in m["refs"] if r["el_id"] == "ref1")
+    fn1 = next(n["key"] for n in m["notes"] if n["el_id"] == "fn1")
+    before3 = c.get(f"/api/books/{bid}/preview/ch3.xhtml").get_data(as_text=True)
+    r = c.post(f"/api/books/{bid}/note/preview", json={"edits": {
+        "backlinks": [{"ref_key": ref1, "note_key": fn1}]}})
+    d = r.get_json()
+    check("注释:跨章回程预览 200", r.status_code == 200, d.get("error"))
+    pm_note = next(x for x in d["model"]["notes"] if x["el_id"] == "fn1")
+    pm_ref = next(x for x in d["model"]["refs"] if x["el_id"] == "ref1")
+    bl = next((b for b in pm_note["backlinks"] if b["ref_key"] == pm_ref["key"]),
+              None)
+    check("注释:跨章回程解析到 ch1#ref1",
+          bl is not None and bl["target_doc"] == "ch1.xhtml"
+          and bl["target_frag"] == "ref1", bl)
+    check("注释:跨章回程预览不落盘（两章均不变）",
+          xhtml_sem(ch1_html()) == xhtml_sem(before1)
+          and xhtml_sem(c.get(f"/api/books/{bid}/preview/ch3.xhtml")
+                        .get_data(as_text=True)) == xhtml_sem(before3))
+
+    r = c.post(f"/api/books/{bid}/note/save", json={"edits": {
+        "backlinks": [{"ref_key": ref1, "note_key": fn1}]}})
+    d = r.get_json()
+    check("注释:跨章回程保存成功", r.status_code == 200 and d["ok"], d.get("error"))
+    ch3_now = c.get(f"/api/books/{bid}/preview/ch3.xhtml").get_data(as_text=True)
+    check("注释:跨章回链写入注释章（ch3 → ch1.xhtml#ref1）",
+          'href="ch1.xhtml#ref1"' in ch3_now,
+          [ln for ln in ch3_now.splitlines() if "ref1" in ln][:2])
+    with zipfile.ZipFile(_db.get_book(bid)["path"]) as zf:
+        disk3 = zf.read("ch3.xhtml").decode("utf-8")
+    check("注释:跨章回链写入 working.epub",
+          'href="ch1.xhtml#ref1"' in disk3)
+    check("注释:跨章回程遗漏问题消除",
+          not any("ref1" in i["message"] and "回程链接" in i["message"]
+                  for i in d["state"]["issues"] if i["check_name"] == "note_a11y"))
+    # 撤销恢复：两章（引用章 id 与注释章回链）都逐字复原
+    c.post(f"/api/books/{bid}/undo")
+    check("注释:跨章回程撤销后两章复原",
+          xhtml_sem(ch1_html()) == xhtml_sem(before1)
+          and xhtml_sem(c.get(f"/api/books/{bid}/preview/ch3.xhtml")
+                        .get_data(as_text=True)) == xhtml_sem(before3))
 
     # 跨书目连线被阻止（注号[2] 外部引用改连本书注释）
     ext_ref = next(r["key"] for r in m["refs"]

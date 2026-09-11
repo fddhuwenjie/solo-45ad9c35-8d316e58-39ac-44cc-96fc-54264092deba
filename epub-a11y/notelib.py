@@ -837,6 +837,55 @@ def _guard_graph(book, before_graph):
     return g
 
 
+def _key_doc(key):
+    try:
+        return _split_key(key)[0]
+    except (ValueError, AttributeError):
+        return None
+
+
+def affected_docs(book, edits):
+    """计算一批编辑实际会改写的全部 spine 章节。
+
+    关键点：
+    - backlinks 同时改写引用章（可能自动补 id/包裹为锚点）与注释章（写入回链），
+      跨章时二者不同，缺一就会漏写回链或漏掉引用章的 id 变更；
+    - links 同理（引用章写 href，注释章可能自动补 id）；
+    - batch_group 按当前关系图解析出组内每个 ref/note 的章节
+      （尾注全书匹配时注释可能在另一章），不能只看负载里出现的 key。"""
+    docs = set()
+
+    def add(key):
+        doc = _key_doc(key or "")
+        if doc:
+            docs.add(doc)
+
+    for item in edits.get("marks") or []:
+        add(item.get("key"))
+    for item in edits.get("unmarks") or []:
+        add(item.get("key"))
+    for item in edits.get("unlinks") or []:
+        add(item.get("key"))
+    for item in edits.get("deletes") or []:
+        add(item.get("key"))
+    for lk in edits.get("links") or []:
+        add(lk.get("ref_key"))
+        add(lk.get("note_key"))
+    for bk in edits.get("backlinks") or []:
+        add(bk.get("ref_key"))
+        add(bk.get("note_key"))
+
+    gid = edits.get("batch_group")
+    if gid:
+        g = build_graph(book)
+        group = next((x for x in g["batches"] if x["id"] == gid), None)
+        if group is not None:
+            for it in group["items"]:
+                add(it.get("ref_key"))
+                add(it.get("note_key"))
+    return {h for h in docs if h in book.raw}
+
+
 def commit_note_edits(book, edits):
     """应用一批注释关系编辑，返回 (summary, affected_docs)。
 
@@ -852,20 +901,9 @@ def commit_note_edits(book, edits):
     summary = []
     remap = {}  # 非锚点引用被包裹为 <a> 后：旧 key → 新锚点 key
 
-    affected = set()
-    for item in marks + unmarks + links + unlinks + backlinks + deletes:
-        key = item.get("key") or item.get("ref_key") or item.get("note_key")
-        if key:
-            try:
-                affected.add(_split_key(key)[0])
-            except ValueError:
-                pass
-    for lk in links:
-        if lk.get("note_key"):
-            affected.add(_split_key(lk["note_key"])[0])
-    for bk in backlinks:
-        if bk.get("ref_key"):
-            affected.add(_split_key(bk["ref_key"])[0])
+    # 受影响章节统一由 affected_docs 解析（含跨章 backlinks/links 双方
+    # 与 batch_group 展开的全部章节），快照、dirty、写回 EPUB 都以此为准。
+    affected = affected_docs(book, edits)
     snapshots = {h: str(book.soup(h)) for h in affected}
     # 提交前已存在的环路 / 跨书目链接：允许保留（本就作为问题报告），
     # 守恒校验只阻止本次提交新引入的关系问题。
@@ -1086,33 +1124,23 @@ def _apply_batch(book, group_id, remap):
 
 
 def preview_note_edits(book, edits):
-    """在内存文档树上应用编辑、重算模型后整体回滚，不落盘。"""
-    affected = set()
+    """在内存文档树上应用编辑、重算模型后整体回滚，不落盘。
 
-    def collect_key(k):
-        if k:
-            try:
-                affected.add(_split_key(k)[0])
-            except ValueError:
-                pass
-
-    for item in (edits.get("marks") or []) + (edits.get("unmarks") or []):
-        collect_key(item.get("key"))
-    for lk in edits.get("links") or []:
-        collect_key(lk.get("ref_key"))
-        collect_key(lk.get("note_key"))
-    for bk in edits.get("backlinks") or []:
-        collect_key(bk.get("ref_key"))
-        collect_key(bk.get("note_key"))
-    for dk in edits.get("deletes") or []:
-        collect_key(dk.get("key"))
-    snaps = {h: str(book.soup(h)) for h in affected}
+    快照覆盖全部 spine 文档（而不仅是负载里出现的 key），保证 batch_group
+    解析出的跨章改动或任何未预料的写入都会被回滚：预览结束后实时文档树与
+    预览前逐字一致，随后同组 /note/save 仍在原始 DOM 上执行。"""
+    snap_docs = [h for h in book.spine if h in book.raw]
+    snaps = {h: str(book.soup(h)) for h in snap_docs}
+    dirty_before = set(book.dirty)
     try:
         commit_note_edits(book, edits)
         return note_model_json(book, build_graph(book))
     finally:
         for h, s in snaps.items():
             _restore_doc(book, h, s)
+        # 回滚不应把这些文档留在 dirty 集合（预览从未落盘）
+        book.dirty.clear()
+        book.dirty.update(dirty_before)
 
 
 def take_snapshot(book):
