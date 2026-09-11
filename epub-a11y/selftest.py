@@ -182,9 +182,29 @@ def _build_and_import_body_list_book(c):
     return r.get_json()["book_id"]
 
 
+def run_node_list_tests():
+    """运行列表工作区前端逻辑回归（static/list_test.js，node 不可用时跳过）。"""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        print("SKIP   node 不可用，跳过列表前端回归")
+        return
+    js = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "static", "list_test.js")
+    p = subprocess.run([node, js], capture_output=True, text=True)
+    print(p.stdout.strip())
+    if p.stderr.strip():
+        print(p.stderr.strip())
+    if p.returncode != 0:
+        FAIL.append("列表前端回归(list_test.js)")
+
+
 def main():
     db.init_db()
     c = app.test_client()
+
+    run_node_list_tests()
 
     # 1. 载入样例书
     r = c.post("/api/load_sample")
@@ -591,6 +611,40 @@ def main():
         "type": "ol", "start": "abc"})
     check("非法 start 被拒绝", r.status_code == 400)
     check("非法 start 不改变 XHTML", ch5_unchanged())
+
+    # 真实前端负载（与 static/list.js 的 createFromSelection 完全同形）：
+    # 必含 chapter_id；曾因缺该字段导致后端 KeyError → 500
+    br_cand = [x for x in cand["candidates"] if x.get("split_br")][0]
+    real_payload = {
+        "chapter_id": ch5["id"],
+        "paths": br_cand["item_paths"],
+        "type": "ol",
+        "strip_markers": True,
+        "blocks": {},
+        "start": 1,
+    }
+    r = c.post(f"/api/books/{bid}/list/create", json=real_payload)
+    d = r.get_json()
+    check("真实组合负载（含 chapter_id）返回 200 而非 500",
+          r.status_code == 200 and d.get("ok"), (r.status_code, d.get("error")))
+    if r.status_code == 200:
+        check("真实负载拆出 3 个 li 并返回双栏快照",
+              len(d["model"]["items"]) == 3
+              and bool(d.get("before_pretty")) and bool(d.get("after_pretty")))
+        c.post(f"/api/books/{bid}/undo")
+        check("真实负载撤销后复原", ch5_unchanged())
+
+    # 边界方向契约：后端只认 before/after（前端 dirOf 已把 prev/next 映射过去）。
+    # ol[1] 下一侧被 h3 截断，用 after + 处置方式可接续；不传处置则 400。
+    ol1_path = next(p for p in cand["lists"] if p.endswith("ol[1]"))
+    r = c.post(f"/api/books/{bid}/list/op", json={
+        "chapter_id": ch5["id"], "path": ol1_path,
+        "op": "join", "params": {"side": "after", "placement": "into_prev"}})
+    check("after 方向接续被截断列表成功",
+          r.status_code == 200 and r.get_json().get("ok"), r.get_json().get("error"))
+    if r.status_code == 200:
+        c.post(f"/api/books/{bid}/undo")
+        check("接续撤销后复原", ch5_unchanged())
 
     # 失败请求不落地：跨父节点（交叉嵌套）—— 取两个不同父的段落路径
     nodes5 = c.get(f"/api/books/{bid}/chapters/{ch5['id']}/nodes").get_json()["nodes"]

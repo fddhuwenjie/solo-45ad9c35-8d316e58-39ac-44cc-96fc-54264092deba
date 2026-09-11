@@ -12,6 +12,8 @@ const L = {
   blocks: {},            // create 模式：拦截元素路径 -> 处置方式
   selectedItem: null,    // edit 模式下选中的 li 路径
   draftType: "ul",
+  diffBefore: "",        // 最近一次操作提交前的 DOM 快照（跨重绘保留）
+  diffAfter: "",         // 最近一次操作提交后的 DOM 快照（跨重绘保留）
 };
 
 const LIST_BLOCK_TAGS = ["h1", "h2", "h3", "h4", "h5", "h6", "img", "figure", "aside"];
@@ -25,6 +27,8 @@ async function openListWorkspaceCreate(chapterId, paths, candidate) {
   L.selected = new Set(paths || []);
   L.blocks = {};
   L.selectedItem = null;
+  L.diffBefore = "";
+  L.diffAfter = "";
   if (candidate) {
     L.draftType = candidate.suggested || "ul";
     (candidate.blocks || []).forEach((b) => { L.blocks[b.path] = b.placement || "into_prev"; });
@@ -40,6 +44,8 @@ async function openListWorkspaceEdit(chapterId, path) {
   L.selected = new Set();
   L.blocks = {};
   L.selectedItem = null;
+  L.diffBefore = "";
+  L.diffAfter = "";
   $("#listModal").classList.add("open");
   await loadListModel();
 }
@@ -72,8 +78,9 @@ function renderListWorkspace() {
   } else {
     renderEditMode();
   }
-  $("#lwBefore").textContent = "";
-  $("#lwAfter").textContent = "";
+  // 对照栏内容保存在 L.diff* 中，重绘不清空；仅在打开新工作区时重置
+  $("#lwBefore").textContent = L.diffBefore;
+  $("#lwAfter").textContent = L.diffAfter;
   renderReading();
   renderIssues();
 }
@@ -226,22 +233,27 @@ function neighborHtml(side, nb) {
   return `<div class="lw-b-${side}"><span class="tag-badge">${esc(nb.tag)}</span>${esc(nb.text || "")} ${action}</div>`;
 }
 
+// 前端边界方向 prev/next → 后端期望的 before/after
+function dirOf(side) {
+  return side === "prev" ? "before" : "after";
+}
+
 function renderBoundaries() {
   const b = L.model.boundaries || {};
   $("#lwPrev").innerHTML = neighborHtml("prev", b.prev);
   $("#lwNext").innerHTML = neighborHtml("next", b.next);
   $("#lwPrev").querySelectorAll(".lw-join,.lw-extend").forEach((btn) => {
     btn.onclick = () => op(btn.classList.contains("lw-join") ? "join" : "extend",
-      { side: "prev" });
+      { side: dirOf("prev") });
   });
   $("#lwNext").querySelectorAll(".lw-join,.lw-extend").forEach(btn => {
     btn.onclick = () => op(btn.classList.contains("lw-join") ? "join" : "extend",
-      { side: "next" });
+      { side: dirOf("next") });
   });
   document.querySelectorAll(".lw-blocksel").forEach((sel) => {
     sel.onchange = () => {
       if (!sel.value) return;
-      op("extend", { side: sel.dataset.side, placement: sel.value });
+      op("extend", { side: dirOf(sel.dataset.side), placement: sel.value });
     };
   });
 }
@@ -250,6 +262,7 @@ function renderBoundaries() {
 async function createFromSelection() {
   if (!L.selected.size) { toast("请先框选至少一个节点", true); return; }
   const body = {
+    chapter_id: L.chapterId,
     paths: [...L.selected],
     type: $("#lwType").value,
     strip_markers: $("#lwStrip").checked,
@@ -300,8 +313,10 @@ function afterListCommit(r) {
 }
 
 function showDiff(before, after) {
-  $("#lwBefore").textContent = before || "";
-  $("#lwAfter").textContent = after || "";
+  L.diffBefore = before || "";
+  L.diffAfter = after || "";
+  $("#lwBefore").textContent = L.diffBefore;
+  $("#lwAfter").textContent = L.diffAfter;
 }
 
 /* ---------------- 控件绑定 ---------------- */
